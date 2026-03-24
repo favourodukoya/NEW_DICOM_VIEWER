@@ -4,7 +4,8 @@ mod security;
 mod storage;
 mod cleanup;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tracing_subscriber;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -17,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -59,6 +61,22 @@ pub fn run() {
             let app_handle2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 cleanup::run_cleanup_scheduler(app_handle2).await;
+            });
+
+            // ── Deep link / "Open with" file association handler ──────────────
+            // Fires when the app is opened by double-clicking a .dcm/.zip file
+            // or via the ukubona:// URI scheme. We forward the paths to the
+            // main window as a custom event so the JS side can upload them.
+            let app_handle3 = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                let paths: Vec<String> = event.urls().iter()
+                    .map(|u| u.to_string())
+                    .collect();
+                if paths.is_empty() { return; }
+                tracing::info!("Deep link opened with {} path(s)", paths.len());
+                if let Some(window) = app_handle3.get_webview_window("main") {
+                    let _ = window.emit("ukubona://open-files", &paths);
+                }
             });
 
             Ok(())

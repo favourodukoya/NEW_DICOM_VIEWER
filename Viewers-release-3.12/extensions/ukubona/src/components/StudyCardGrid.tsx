@@ -32,7 +32,6 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   const [loadingStudy, setLoadingStudy] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [modalityFilter, setModalityFilter] = useState<ModalityFilter>('ALL');
-  const [dragging, setDragging] = useState(false);
   const [uploadJobs, setUploadJobs] = useState<Array<{
     id: string; name: string; status: 'uploading' | 'success' | 'error'; error?: string;
   }>>([]);
@@ -113,6 +112,47 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   useEffect(() => {
     if (authed) fetchStudies();
   }, [authed, fetchStudies]);
+
+  // ── Deep-link / "Open with" file handler ────────────────────────────────────
+  // Tauri emits 'ukubona://open-files' with an array of file paths when the app
+  // is launched by double-clicking a .dcm or .zip file, or via the ukubona:// URI scheme.
+  useEffect(() => {
+    if (!tauri.isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<string[]>('ukubona://open-files', async event => {
+          const paths: string[] = event.payload ?? [];
+          if (!paths.length) return;
+          for (const p of paths) {
+            const lower = p.toLowerCase();
+            // Strip ukubona:// or file:// prefix if present
+            const filePath = p.replace(/^(ukubona:\/\/open\?path=|file:\/\/\/?)/, '');
+            const name = filePath.split(/[\\/]/).pop() ?? filePath;
+            const id = Math.random().toString(36).slice(2);
+            setUploadJobs(prev => [...prev, { id, name, status: 'uploading' }]);
+            try {
+              // Read file as base64 via Tauri fs plugin internals
+              const inv = (window as any).__TAURI_INTERNALS__.invoke;
+              const b64: string = await inv('plugin:fs|read_file', { path: filePath, options: { encoding: 'base64' } });
+              if (lower.endsWith('.zip')) {
+                await tauri.uploadZip(b64, name);
+              } else {
+                await tauri.uploadDicomFiles([{ name, data: b64 }]);
+              }
+              setUploadJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'success' } : j));
+              setTimeout(() => fetchStudies(), 600);
+            } catch (e) {
+              setUploadJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'error', error: String(e) } : j));
+            }
+            setTimeout(() => setUploadJobs(prev => prev.filter(j => j.id !== id)), 4000);
+          }
+        });
+      } catch { /* not in Tauri or event API unavailable */ }
+    })();
+    return () => { unlisten?.(); };
+  }, [fetchStudies]);
 
   // Clear viewer-active state and restore default title when study list is shown
   useEffect(() => {
@@ -317,16 +357,6 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     } catch (e) { console.error(e); }
   }, []);
 
-  // ── Drag-drop ───────────────────────────────────────────────────────────────
-  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setDragging(true); };
-  const onDragLeave = (e: React.DragEvent) => {
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false);
-  };
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault(); setDragging(false);
-    handleDroppedFiles(Array.from(e.dataTransfer.files));
-  };
-
   // ── Filter ──────────────────────────────────────────────────────────────────
   const filtered = studies.filter(s => {
     const q = search.toLowerCase();
@@ -349,27 +379,7 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   const activeUploads = uploadJobs.filter(j => j.status === 'uploading').length;
 
   return (
-    <div
-      className="relative flex min-h-screen flex-col bg-[#0f1117]"
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-    >
-      {/* Drag overlay with animation */}
-      {dragging && (
-        <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-[#0f1117]/90 backdrop-blur-sm transition-all duration-200">
-          <div className="animate-pulse rounded-2xl border-2 border-dashed border-[#3b82f6] bg-[#3b82f6]/10 px-16 py-12 text-center shadow-[0_0_60px_rgba(59,130,246,0.15)]">
-            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[#3b82f6]/20">
-              <svg className="text-[#3b82f6]" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
-              </svg>
-            </div>
-            <p className="text-base font-semibold text-white">Drop files here</p>
-            <p className="mt-1.5 text-sm text-[#9ca3af]">DICOM files, ZIP archives, or folders</p>
-          </div>
-        </div>
-      )}
-
+    <div className="relative flex min-h-screen flex-col bg-[#0f1117]">
       {/* Header */}
       <header className="sticky top-0 z-20 flex items-center justify-between border-b border-[#1e2433] bg-[#0f1117] px-5 py-2.5">
         {/* Brand + status */}

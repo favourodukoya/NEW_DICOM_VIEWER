@@ -328,24 +328,27 @@ export default function StudyCard({
           </div>
         </div>
 
-        {/* Mode buttons */}
+        {/* Mode buttons — icon-only with tooltip */}
         <div className="flex border-t border-[#1e2433]">
           {modes.map((mode, i) => (
             <button
               key={mode.id}
-              onClick={e => {
-                e.stopPropagation();
-                onOpenMode?.(mode);
-              }}
+              onClick={e => { e.stopPropagation(); onOpenMode?.(mode); }}
+              title={mode.label}
               className={[
-                'flex flex-1 items-center justify-center gap-1 py-1.5 text-[10px] font-medium text-[#6b7280] transition',
-                'hover:bg-[#1e2a45] hover:text-[#63b3ed]',
+                'group/mb relative flex flex-1 items-center justify-center py-2 text-[#4b5563] transition-colors',
+                'hover:bg-[#161b26] hover:text-[#60a5fa]',
                 i > 0 ? 'border-l border-[#1e2433]' : '',
               ].join(' ')}
-              title={`Open in ${mode.label}`}
             >
-              <span className="flex h-3.5 w-3.5 items-center justify-center [&>svg]:h-3 [&>svg]:w-3">{mode.icon}</span>
-              {mode.label}
+              {/* icon */}
+              <span className="flex h-[15px] w-[15px] items-center justify-center [&>svg]:h-[14px] [&>svg]:w-[14px]">
+                {mode.icon}
+              </span>
+              {/* floating tooltip */}
+              <span className="pointer-events-none absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[#1e2433] px-2 py-1 text-[10px] font-medium text-[#e5e7eb] opacity-0 shadow-lg transition-opacity group-hover/mb:opacity-100">
+                {mode.label}
+              </span>
             </button>
           ))}
         </div>
