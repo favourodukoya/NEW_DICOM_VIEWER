@@ -145,7 +145,7 @@ function ContextMenu({ x, y, studyInstanceUid, patientName, onClose, onOpenRepor
             const mode = modes[0];
             const label = `viewer_${studyInstanceUid.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20)}_${Date.now()}`;
             await openTauriWindow(label, {
-              url: `/${mode.route}${mode.dataPath}?StudyInstanceUIDs=${studyInstanceUid}`,
+              url: `/${mode.route}${mode.dataPath}?StudyInstanceUIDs=${studyInstanceUid}${mode.extraParams ?? ''}`,
               title: `${patientName || 'Study'} — ${mode.label}`,
               width: 1200,
               height: 800,

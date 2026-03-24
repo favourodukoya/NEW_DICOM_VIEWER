@@ -37,6 +37,8 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   }>>([]);
   const [modeModal, setModeModal] = useState<StudyItem | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<StudyItem | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragCounter = useRef(0); // tracks nested enter/leave so overlay doesn't flicker
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutHasWindows, setLogoutHasWindows] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -188,9 +190,11 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
         const inOrthanc = await tauri.checkStudyInOrthanc(study.studyInstanceUid).catch(() => true);
         if (!inOrthanc) await tauri.importStudyToOrthanc(study.studyInstanceUid);
       }
-      navigate(`/${mode.route}${mode.dataPath}?StudyInstanceUIDs=${study.studyInstanceUid}`);
+      const extra = mode.extraParams ?? '';
+      navigate(`/${mode.route}${mode.dataPath}?StudyInstanceUIDs=${study.studyInstanceUid}${extra}`);
     } catch {
-      navigate(`/${mode.route}${dataPath}?StudyInstanceUIDs=${study.studyInstanceUid}`);
+      const extra = mode.extraParams ?? '';
+      navigate(`/${mode.route}${dataPath}?StudyInstanceUIDs=${study.studyInstanceUid}${extra}`);
     } finally {
       setLoadingStudy(null);
     }
@@ -357,6 +361,27 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     } catch (e) { console.error(e); }
   }, []);
 
+  // ── Drag-drop (whole page is the drop zone) ─────────────────────────────────
+  // dragCounter prevents the overlay from flickering when the pointer moves
+  // between child elements (each child fires dragLeave then dragEnter).
+  const onDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current += 1;
+    if (dragCounter.current === 1) setDragging(true);
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current -= 1;
+    if (dragCounter.current === 0) setDragging(false);
+  };
+  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); };
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = 0;
+    setDragging(false);
+    handleDroppedFiles(Array.from(e.dataTransfer.files));
+  };
+
   // ── Filter ──────────────────────────────────────────────────────────────────
   const filtered = studies.filter(s => {
     const q = search.toLowerCase();
@@ -379,7 +404,30 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   const activeUploads = uploadJobs.filter(j => j.status === 'uploading').length;
 
   return (
-    <div className="relative flex min-h-screen flex-col bg-[#0f1117]">
+    <div
+      className="relative flex min-h-screen flex-col bg-[#0f1117]"
+      onDragEnter={onDragEnter}
+      onDragLeave={onDragLeave}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+    >
+      {/* Full-page drag overlay */}
+      {dragging && (
+        <div className="pointer-events-none fixed inset-0 z-40 flex flex-col items-center justify-center gap-4 bg-[#0d1117]/90 backdrop-blur-sm">
+          <div className="rounded-2xl border-2 border-dashed border-[#3b82f6]/60 bg-[#3b82f6]/5 px-20 py-14 text-center shadow-[0_0_80px_rgba(59,130,246,0.12)]">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-[#3b82f6]/15">
+              <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="1.5">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+            </div>
+            <p className="text-sm font-semibold text-white">Drop to import</p>
+            <p className="mt-1 text-xs text-[#6b7280]">DICOM files or ZIP archives</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="sticky top-0 z-20 flex items-center justify-between border-b border-[#1e2433] bg-[#0f1117] px-5 py-2.5">
         {/* Brand + status */}

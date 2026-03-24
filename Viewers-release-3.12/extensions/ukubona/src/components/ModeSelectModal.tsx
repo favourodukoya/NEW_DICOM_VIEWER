@@ -13,6 +13,8 @@ export interface ViewerMode {
   shortLabel: string;
   /** Accent colour for the icon background tint */
   color: string;
+  /** Extra query params appended to the viewer URL (e.g. '&hangingProtocolId=mpr') */
+  extraParams?: string;
 }
 
 const VIEWER_MODES: ViewerMode[] = [
@@ -57,6 +59,7 @@ const VIEWER_MODES: ViewerMode[] = [
     description: 'Multi-planar reconstruction and 3D volume rendering for cross-sectional studies.',
     route: 'basic',
     dataPath: '/orthanc',
+    extraParams: '&hangingProtocolId=mpr',
     modalities: ['CT', 'MR', 'PT', 'PET', 'NM'],
     color: '#8b5cf6',
     icon: (

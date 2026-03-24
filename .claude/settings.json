@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -rn \"toggleHpMNGrid\\\\|setHangingProtocol\\\\|hangingProtocolService.run\\\\b\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12 --include=*.ts --include=*.tsx)",
+      "Bash(grep -rn \"id.*mpr\\\\|mpr.*id\\\\|@ohif.*mpr\\\\|cornerstone.*mpr\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions --include=*.ts --include=*.tsx -l)",
+      "Bash(grep -n ids*: c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/cornerstone/src/hps/mpr.ts)",
+      "Bash(grep -rn \"useNorm16Texture\\\\|preferSizeOverAccuracy\\\\|useSharedArrayBuffer\\\\|targetFrameRate\\\\|volumeLoadObject\\\\|cacheSize\\\\|maxCacheSize\\\\|webGPU\\\\|gpu\\\\|GPU\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/cornerstone/src --include=*.ts --include=*.tsx)",
+      "Bash(grep -rn \"useNorm16\\\\|preferSizeOverAccuracy\\\\|useSharedArray\\\\|targetFrameRate\\\\|numWorkers\\\\|workerPool\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/cornerstone/src --include=*.ts --include=*.tsx)",
+      "Bash(grep -rn \"useNorm16\\\\|preferSizeOverAccuracy\\\\|targetFrameRate\\\\|numWorkers\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12 --include=*.ts --include=*.tsx --include=*.js -l)",
+      "Bash(grep -rn \"preferSizeOverAccuracy\\\\|useNorm16\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/cornerstone/src --include=*.ts --include=*.tsx)",
+      "Bash(grep -rn \"preferSizeOverAccuracy\\\\|useNorm16Texture\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/platform/app/src --include=*.ts --include=*.tsx --include=*.js)",
+      "Bash(grep -rn \"useNorm16Texture\\\\|preferSizeOverAccuracy\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12 --include=*.ts --include=*.tsx -l)"
+    ]
+  }
+}

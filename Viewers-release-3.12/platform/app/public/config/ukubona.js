@@ -27,21 +27,45 @@ window.config = {
   name: 'ukubona',
   routerBasename: '/',
   investigationalUseDialog: { option: 'never' },
-  // Ukubona extension provides its own custom study list via routes.customRoutes
-  // showStudyList must be true so that the OHIF Header logo is clickable (navigates back)
   showStudyList: true,
-  maxNumberOfWebWorkers: 3,
   showLoadingIndicator: true,
   showWarningMessageForCrossOrigin: false,
   showCPUFallbackMessage: false,
-  strictZSpacingForVolumeViewport: true,
   groupEnabledModesFirst: true,
   allowMultiSelectExport: false,
+
+  // ── GPU / rendering ──────────────────────────────────────────────────────────
+  // Always use WebGL GPU path; never fall back to CPU (which is 10–20× slower).
+  useCPURendering: false,
+  // 16-bit normalised textures: native GPU precision for CT/MR HU values.
+  // Avoids a float32 CPU-side rescale step before each upload to the GPU.
+  useNorm16Texture: true,
+  // Prefer GPU texture size over CPU-side accuracy; reduces data transfer per frame.
+  preferSizeOverAccuracy: true,
+  // Relaxed Z-spacing lets the GPU re-use cached volume slabs more aggressively.
+  strictZSpacingForVolumeViewport: false,
+
+  // ── Web workers ─────────────────────────────────────────────────────────────
+  // Use as many workers as the CPU can sustain (capped at logical core count – 1).
+  // More workers = more parallel DICOM decode / decompress jobs.
+  maxNumberOfWebWorkers: Math.max(2, (navigator.hardwareConcurrency || 4) - 1),
+
+  // ── Request concurrency ──────────────────────────────────────────────────────
+  // High interaction concurrency so windowing/pan/zoom stay responsive while
+  // volume slices are still streaming in.
+  // Prefetch is kept lower to avoid saturating the local Orthanc HTTP server.
   maxNumRequests: {
-    interaction: 100,
-    thumbnail: 50,
-    prefetch: 25,
+    interaction: 128,
+    thumbnail: 32,
+    prefetch: 16,
+    compute: 8,
   },
+
+  // ── Volume cache ─────────────────────────────────────────────────────────────
+  // 2 GB GPU-side cache for decoded volumes.  A typical CT study (512×512×300)
+  // is ~150 MB decoded; this fits ~13 studies before eviction kicks in.
+  // Adjust down if the device has less than 8 GB of system RAM.
+  maxCacheSize: 2 * 1024 * 1024 * 1024,
 
   // ─── Extensions & Modes ──────────────────────────────────────────────────────
   extensions: ['@ukubona/extension-ukubona'],
