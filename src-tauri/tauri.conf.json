@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ukubona Viewer",
+  "version": "0.1.0",
+  "identifier": "com.ukubona.viewer",
+  "build": {
+    "frontendDist": "../Viewers-release-3.12/platform/app/dist",
+    "devUrl": "http://localhost:33128",
+    "beforeDevCommand": "cd Viewers-release-3.12 && npx yarn workspace @ohif/app run dev:tauri",
+    "beforeBuildCommand": "cd Viewers-release-3.12 && npx yarn workspace @ohif/app run build:tauri"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Ukubona DICOM Viewer",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {}
+}

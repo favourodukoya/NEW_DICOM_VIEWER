@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:www.radiantviewer.com)",
+      "WebFetch(domain:docs.ohif.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:ohif.org)",
+      "WebFetch(domain:defkey.com)"
+    ]
+  }
+}

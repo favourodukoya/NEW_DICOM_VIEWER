@@ -1,0 +1,20 @@
+{
+  "name": "ukubona-desktop-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ukubona DICOM Viewer — RadiAnt-like desktop app (Tauri + OHIF + Orthanc)",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "ohif:install": "cd Viewers-release-3.12 && npx yarn install",
+    "ohif:dev": "cd Viewers-release-3.12 && npx yarn dev:tauri",
+    "ohif:build": "cd Viewers-release-3.12 && npx yarn build:tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  }
+}

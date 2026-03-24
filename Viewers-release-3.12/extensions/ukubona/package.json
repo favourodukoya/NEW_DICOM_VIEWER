@@ -1,0 +1,19 @@
+{
+  "name": "@ukubona/extension-ukubona",
+  "version": "0.1.0",
+  "description": "Ukubona custom extension for OHIF Viewer",
+  "main": "src/index.tsx",
+  "private": true,
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@ohif/core": "*",
+    "@ohif/ui": "*",
+    "@ohif/ui-next": "*",
+    "@tauri-apps/api": "^2.0.0",
+    "lucide-react": "*",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  }
+}

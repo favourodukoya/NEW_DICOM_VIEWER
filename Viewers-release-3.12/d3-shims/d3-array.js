@@ -1,0 +1,62 @@
+/**
+ * d3-array shim — see d3-interpolate.js for rationale.
+ * All exports use direct relative file paths to bypass exports-field resolution.
+ */
+
+export { default as bisect, bisectRight, bisectLeft, bisectCenter } from '../node_modules/d3-array/src/bisect.js';
+export { default as ascending }          from '../node_modules/d3-array/src/ascending.js';
+export { default as bisector }           from '../node_modules/d3-array/src/bisector.js';
+export { blur, blur2, blurImage }        from '../node_modules/d3-array/src/blur.js';
+export { default as count }              from '../node_modules/d3-array/src/count.js';
+export { default as cross }              from '../node_modules/d3-array/src/cross.js';
+export { default as cumsum }             from '../node_modules/d3-array/src/cumsum.js';
+export { default as descending }         from '../node_modules/d3-array/src/descending.js';
+export { default as deviation }          from '../node_modules/d3-array/src/deviation.js';
+export { default as extent }             from '../node_modules/d3-array/src/extent.js';
+export { Adder, fsum, fcumsum }          from '../node_modules/d3-array/src/fsum.js';
+export { default as group, flatGroup, flatRollup, groups, index, indexes, rollup, rollups } from '../node_modules/d3-array/src/group.js';
+export { default as groupSort }          from '../node_modules/d3-array/src/groupSort.js';
+export { default as bin, default as histogram } from '../node_modules/d3-array/src/bin.js';
+export { default as thresholdFreedmanDiaconis } from '../node_modules/d3-array/src/threshold/freedmanDiaconis.js';
+export { default as thresholdScott }     from '../node_modules/d3-array/src/threshold/scott.js';
+export { default as thresholdSturges }   from '../node_modules/d3-array/src/threshold/sturges.js';
+export { default as max }                from '../node_modules/d3-array/src/max.js';
+export { default as maxIndex }           from '../node_modules/d3-array/src/maxIndex.js';
+export { default as mean }               from '../node_modules/d3-array/src/mean.js';
+export { default as median, medianIndex } from '../node_modules/d3-array/src/median.js';
+export { default as merge }              from '../node_modules/d3-array/src/merge.js';
+export { default as min }                from '../node_modules/d3-array/src/min.js';
+export { default as minIndex }           from '../node_modules/d3-array/src/minIndex.js';
+export { default as mode }               from '../node_modules/d3-array/src/mode.js';
+export { default as nice }               from '../node_modules/d3-array/src/nice.js';
+export { default as pairs }              from '../node_modules/d3-array/src/pairs.js';
+export { default as permute }            from '../node_modules/d3-array/src/permute.js';
+export { default as quantile, quantileIndex, quantileSorted } from '../node_modules/d3-array/src/quantile.js';
+export { default as quickselect }        from '../node_modules/d3-array/src/quickselect.js';
+export { default as range }              from '../node_modules/d3-array/src/range.js';
+export { default as rank }               from '../node_modules/d3-array/src/rank.js';
+export { default as least }              from '../node_modules/d3-array/src/least.js';
+export { default as leastIndex }         from '../node_modules/d3-array/src/leastIndex.js';
+export { default as greatest }           from '../node_modules/d3-array/src/greatest.js';
+export { default as greatestIndex }      from '../node_modules/d3-array/src/greatestIndex.js';
+export { default as scan }               from '../node_modules/d3-array/src/scan.js';
+export { default as shuffle, shuffler }  from '../node_modules/d3-array/src/shuffle.js';
+export { default as sum }                from '../node_modules/d3-array/src/sum.js';
+export { default as ticks, tickIncrement, tickStep } from '../node_modules/d3-array/src/ticks.js';
+export { default as transpose }          from '../node_modules/d3-array/src/transpose.js';
+export { default as variance }           from '../node_modules/d3-array/src/variance.js';
+export { default as zip }                from '../node_modules/d3-array/src/zip.js';
+export { default as every }              from '../node_modules/d3-array/src/every.js';
+export { default as some }               from '../node_modules/d3-array/src/some.js';
+export { default as filter }             from '../node_modules/d3-array/src/filter.js';
+export { default as map }                from '../node_modules/d3-array/src/map.js';
+export { default as reduce }             from '../node_modules/d3-array/src/reduce.js';
+export { default as reverse }            from '../node_modules/d3-array/src/reverse.js';
+export { default as sort }               from '../node_modules/d3-array/src/sort.js';
+export { default as difference }         from '../node_modules/d3-array/src/difference.js';
+export { default as disjoint }           from '../node_modules/d3-array/src/disjoint.js';
+export { default as intersection }       from '../node_modules/d3-array/src/intersection.js';
+export { default as subset }             from '../node_modules/d3-array/src/subset.js';
+export { default as superset }           from '../node_modules/d3-array/src/superset.js';
+export { default as union }              from '../node_modules/d3-array/src/union.js';
+export { InternMap, InternSet }          from 'internmap';
