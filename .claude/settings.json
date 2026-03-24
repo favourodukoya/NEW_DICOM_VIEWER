@@ -9,7 +9,14 @@
       "Bash(grep -rn \"useNorm16\\\\|preferSizeOverAccuracy\\\\|targetFrameRate\\\\|numWorkers\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12 --include=*.ts --include=*.tsx --include=*.js -l)",
       "Bash(grep -rn \"preferSizeOverAccuracy\\\\|useNorm16\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/cornerstone/src --include=*.ts --include=*.tsx)",
       "Bash(grep -rn \"preferSizeOverAccuracy\\\\|useNorm16Texture\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/platform/app/src --include=*.ts --include=*.tsx --include=*.js)",
-      "Bash(grep -rn \"useNorm16Texture\\\\|preferSizeOverAccuracy\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12 --include=*.ts --include=*.tsx -l)"
+      "Bash(grep -rn \"useNorm16Texture\\\\|preferSizeOverAccuracy\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12 --include=*.ts --include=*.tsx -l)",
+      "Bash(grep -r drag c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/node_modules/@tauri-apps/api/dist --include=*.js --include=*.d.ts -l)",
+      "Bash(find c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__ -path */node_modules/@tauri-apps/api* -name *.d.ts)",
+      "Bash(find c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/node_modules -path *tauri-apps/plugin-fs* -name *.d.ts)",
+      "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions -name *volumeLoader* -o -name *dataSource*)",
+      "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/default/src -name *dataSource*)",
+      "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/default/src -type f \\\\\\(-name *dicomweb* -o -name *retrieve* \\\\\\))",
+      "Bash(find c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/src-tauri -name orthanc* -not -path */target/*)"
     ]
   }
 }

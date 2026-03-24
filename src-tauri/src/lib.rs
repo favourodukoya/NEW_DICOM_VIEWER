@@ -87,6 +87,7 @@ pub fn run() {
             commands::delete_study_from_orthanc,
             commands::check_study_in_orthanc,
             commands::upload_dicom_files,
+            commands::upload_dicom_paths,
             commands::upload_zip,
             commands::upload_folder,
             commands::save_report,
@@ -106,6 +107,8 @@ pub fn run() {
             commands::validate_session,
             commands::logout_session,
             commands::get_device_id,
+            commands::list_optical_drives,
+            commands::delete_study_by_uid,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

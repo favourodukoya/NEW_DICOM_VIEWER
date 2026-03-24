@@ -14,7 +14,7 @@ export { default as LoginPage } from './components/LoginPage';
 export { default as ModeSelectModal } from './components/ModeSelectModal';
 export * as tauriBridge from './tauriBridge';
 
-const POPUP_PATHS = ['/report-manager', '/ai-panel', '/settings-panel'];
+const POPUP_PATHS = ['/report-manager', '/ai-panel', '/settings-panel', '/pacs-study-list'];
 
 const ukubonaExtension = {
   id,

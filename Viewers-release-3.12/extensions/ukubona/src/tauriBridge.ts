@@ -62,6 +62,9 @@ export interface SaveResult {
 export const uploadDicomFiles = (files: FileUpload[]): Promise<SaveResult[]> =>
   invoke('upload_dicom_files', { files });
 
+export const uploadDicomPaths = (paths: string[]): Promise<SaveResult[]> =>
+  invoke('upload_dicom_paths', { paths });
+
 export const uploadZip = (data: string, filename: string): Promise<SaveResult[]> =>
   invoke('upload_zip', { data, filename });
 
@@ -240,6 +243,17 @@ export const queryPacs = (config: PacsConfig, query: PacsQuery): Promise<PacsStu
 export const retrieveFromPacs = (config: PacsConfig, studyUid: string): Promise<string> =>
   invoke('retrieve_from_pacs', { config, studyUid });
 
+// ─── Optical Drive Detection ──────────────────────────────────────────────────
+
+export interface OpticalDrive {
+  path: string;   // e.g. "D:\\"
+  label: string;  // e.g. "D:"
+  has_media: boolean;
+}
+
+export const listOpticalDrives = (): Promise<OpticalDrive[]> =>
+  invoke('list_optical_drives');
+
 // ─── Tauri Window helpers ────────────────────────────────────────────────────
 
 /** Open a new Tauri webview window using __TAURI_INTERNALS__ directly. */
@@ -376,4 +390,22 @@ export const fileToBase64 = (file: File): Promise<string> =>
 export async function deleteStudyHttp(orthancId: string): Promise<void> {
   const resp = await fetch(`${getOrthancBase()}/studies/${orthancId}`, { method: 'DELETE' });
   if (!resp.ok) throw new Error(`Delete failed: ${resp.status}`);
+}
+
+/** Delete a study by DICOM StudyInstanceUID (used for ephemeral cleanup). */
+export const deleteStudyByUid = (studyUid: string): Promise<void> =>
+  invoke('delete_study_by_uid', { studyUid });
+
+/** Delete a study by DICOM StudyInstanceUID via HTTP (fallback). */
+export async function deleteStudyByUidHttp(studyUid: string): Promise<void> {
+  const base = getOrthancBase();
+  const body = { Level: 'Study', Query: { StudyInstanceUID: studyUid } };
+  const ids: string[] = await fetch(`${base}/tools/find`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json());
+  await Promise.all(ids.map(id =>
+    fetch(`${base}/studies/${id}`, { method: 'DELETE' })
+  ));
 }

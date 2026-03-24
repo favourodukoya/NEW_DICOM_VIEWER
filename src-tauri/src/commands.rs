@@ -53,6 +53,19 @@ pub async fn delete_study_from_orthanc(orthanc_id: String) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
+/// Delete a study from Orthanc by its DICOM StudyInstanceUID.
+/// Used for ephemeral study cleanup at startup / on close.
+#[tauri::command]
+pub async fn delete_study_by_uid(study_uid: String) -> Result<(), String> {
+    match orthanc::find_study_by_uid(&study_uid).await {
+        Ok(Some(orthanc_id)) => orthanc::delete_study(&orthanc_id)
+            .await
+            .map_err(|e| e.to_string()),
+        Ok(None) => Ok(()), // already gone
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // ─── Upload Commands ──────────────────────────────────────────────────────────
 
 /// Upload raw DICOM files from the frontend (base64-encoded bytes)
@@ -105,6 +118,47 @@ pub async fn upload_zip(
     }
 
     let results = storage::save_dicom_files_to_storage(&app, extracted)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for result in &results {
+        if result.success {
+            let _ = auto_import_to_orthanc(&app, &result.study_uid).await;
+        }
+    }
+
+    Ok(results)
+}
+
+/// Upload DICOM files given their absolute filesystem paths (used by drag-drop)
+#[tauri::command]
+pub async fn upload_dicom_paths(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<storage::SaveResult>, String> {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for path in &paths {
+        let lower = path.to_lowercase();
+        if lower.ends_with(".zip") {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let extracted = storage::extract_zip(bytes).await.map_err(|e| e.to_string())?;
+            files.extend(extracted);
+        } else {
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file.dcm")
+                .to_string();
+            files.push((name, bytes));
+        }
+    }
+
+    if files.is_empty() {
+        return Err("No DICOM files found in dropped paths".into());
+    }
+
+    let results = storage::save_dicom_files_to_storage(&app, files)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -376,25 +430,82 @@ pub async fn query_pacs(config: PacsConfig, query: PacsQuery) -> Result<Vec<Pacs
         .await
         .map_err(|e| e.to_string())?;
 
+    // Orthanc ?expand wraps each answer as:
+    //   { "Content": { "PatientName": { "Alphabetic": "SMITH^JOHN" }, "StudyDate": "20240101", ... }, "Index": N }
+    //
+    // DICOM JSON VR rules we handle:
+    //   PN  (PersonName): { "Alphabetic": "..." } or { "Value": [{ "Alphabetic": "..." }] }
+    //   DA/TM/UI/LO/SH: plain string or wrapped in "Value": ["..."]
+    //
+    // We also accept the flat-string form that some PACS servers return (e.g. older Orthanc,
+    // DCM4CHEE, Horos) and the raw hex-tag DICOM JSON form used by others.
     let studies = answers
         .iter()
         .map(|a| {
-            let tags = &a["0008,1030"]; // Study Description
+            // Orthanc ?expand puts data under "Content"; plain DICOM JSON has no wrapper.
+            let content = if a["Content"].is_object() { &a["Content"] } else { a };
+
+            // Extract a plain string from any of the formats a PACS server might use:
+            //  1. Flat string:                   "SMITH^JOHN"
+            //  2. DICOM JSON PN Alphabetic:      { "Alphabetic": "SMITH^JOHN" }
+            //  3. DICOM JSON Value array:         { "Value": ["SMITH^JOHN"] }
+            //  4. DICOM JSON PN in Value array:   { "Value": [{ "Alphabetic": "SMITH^JOHN" }] }
+            //  5. Hex-tag form (raw DICOM JSON):  a["0010,0010"]["Value"][0]
+            let str_field = |friendly: &str, hex: &str| -> String {
+                let node = &content[friendly];
+
+                // 1. Flat string
+                if let Some(s) = node.as_str() {
+                    return s.trim().to_string();
+                }
+                // 2. PN { "Alphabetic": "..." }
+                if let Some(s) = node["Alphabetic"].as_str() {
+                    return s.trim().to_string();
+                }
+                // 3. { "Value": ["..."] }
+                if let Some(s) = node["Value"][0].as_str() {
+                    return s.trim().to_string();
+                }
+                // 4. { "Value": [{ "Alphabetic": "..." }] }
+                if let Some(s) = node["Value"][0]["Alphabetic"].as_str() {
+                    return s.trim().to_string();
+                }
+                // 5. Hex tag DICOM JSON: a["0010,0010"]["Value"][0] (plain or PN)
+                if let Some(s) = a[hex]["Value"][0].as_str() {
+                    return s.trim().to_string();
+                }
+                if let Some(s) = a[hex]["Value"][0]["Alphabetic"].as_str() {
+                    return s.trim().to_string();
+                }
+                String::new()
+            };
+
+            // PersonName fields use ^ delimiters; format as "Last, First Middle" when possible
+            let fmt_pn = |raw: &str| -> String {
+                if raw.is_empty() { return raw.to_string(); }
+                // Replace any DICOM ^ with space — readable on all screens
+                let parts: Vec<&str> = raw.splitn(5, '^').collect();
+                let family = parts.first().copied().unwrap_or("").trim();
+                let given  = parts.get(1).copied().unwrap_or("").trim();
+                match (family.is_empty(), given.is_empty()) {
+                    (false, false) => format!("{}, {}", family, given),
+                    (false, true)  => family.to_string(),
+                    _              => raw.to_string(),
+                }
+            };
+
             PacsStudy {
-                patient_name: a["0010,0010"]["Value"][0]
-                    .as_str()
-                    .unwrap_or("Unknown")
-                    .to_string(),
-                study_instance_uid: a["0020,000D"]["Value"][0]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
-                study_description: tags["Value"][0].as_str().unwrap_or("").to_string(),
-                study_date: a["0008,0020"]["Value"][0]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
-                modality: a["0008,0060"]["Value"][0].as_str().unwrap_or("").to_string(),
+                patient_name: {
+                    let n = str_field("PatientName", "0010,0010");
+                    if n.is_empty() { String::new() } else { fmt_pn(&n) }
+                },
+                study_instance_uid: str_field("StudyInstanceUID", "0020,000D"),
+                study_description: str_field("StudyDescription", "0008,1030"),
+                study_date: str_field("StudyDate", "0008,0020"),
+                modality: {
+                    let m = str_field("ModalitiesInStudy", "0008,0061");
+                    if m.is_empty() { str_field("Modality", "0008,0060") } else { m }
+                },
             }
         })
         .collect();
@@ -526,4 +637,125 @@ pub struct OrthancStatus {
     pub running: bool,
     pub url: String,
     pub dicomweb_root: String,
+}
+
+// ─── Optical Drive Detection ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpticalDrive {
+    pub path: String,   // e.g. "D:\\"
+    pub label: String,  // e.g. "D:"
+    pub has_media: bool,
+}
+
+/// Return all CD/DVD drives currently visible to the OS.
+/// On Windows uses GetLogicalDrives + GetDriveTypeW.
+/// On macOS/Linux scans /Volumes and /media for optical mount points.
+#[tauri::command]
+pub fn list_optical_drives() -> Vec<OpticalDrive> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        extern "system" {
+            fn GetLogicalDrives() -> u32;
+            fn GetDriveTypeW(lp_root_path_name: *const u16) -> u32;
+            fn GetVolumeInformationW(
+                lp_root_path_name: *const u16,
+                lp_volume_name_buffer: *mut u16,
+                n_volume_name_size: u32,
+                lp_volume_serial_number: *mut u32,
+                lp_maximum_component_length: *mut u32,
+                lp_file_system_flags: *mut u32,
+                lp_file_system_name_buffer: *mut u16,
+                n_file_system_name_size: u32,
+            ) -> i32;
+        }
+
+        const DRIVE_CDROM: u32 = 5;
+        let mut drives = Vec::new();
+        let mask = unsafe { GetLogicalDrives() };
+
+        for bit in 0..26u32 {
+            if mask & (1 << bit) == 0 {
+                continue;
+            }
+            let letter = (b'A' + bit as u8) as char;
+            let root: Vec<u16> = format!("{}:\\\0", letter).encode_utf16().collect();
+            let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
+            if drive_type == DRIVE_CDROM {
+                // Check if media is present by trying to read the volume label
+                let mut vol_buf = vec![0u16; 256];
+                let has_media = unsafe {
+                    GetVolumeInformationW(
+                        root.as_ptr(),
+                        vol_buf.as_mut_ptr(),
+                        vol_buf.len() as u32,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        0,
+                    ) != 0
+                };
+                drives.push(OpticalDrive {
+                    path: format!("{}:\\", letter),
+                    label: format!("{}:", letter),
+                    has_media,
+                });
+            }
+        }
+        drives
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // macOS: optical drives appear as /Volumes/... with "cdrom" in their device path
+        // Linux:  /dev/sr* devices mounted under /media or /run/media
+        let mut drives = Vec::new();
+
+        // macOS
+        #[cfg(target_os = "macos")]
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                // Use diskutil info to check if it's optical — approximate: check /dev/disk* type
+                let path_str = path.to_string_lossy().to_string();
+                // Heuristic: check if the backing device is optical via ioreg (skip for now, just expose all removable)
+                let has_media = path.exists();
+                if has_media {
+                    drives.push(OpticalDrive {
+                        label: entry.file_name().to_string_lossy().to_string(),
+                        path: path_str,
+                        has_media: true,
+                    });
+                }
+            }
+        }
+
+        // Linux
+        #[cfg(target_os = "linux")]
+        for dev in ["sr0", "sr1", "cdrom"] {
+            let dev_path = format!("/dev/{}", dev);
+            if !std::path::Path::new(&dev_path).exists() {
+                continue;
+            }
+            // Check if mounted
+            if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+                for line in mounts.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 && parts[0].contains(dev) {
+                        drives.push(OpticalDrive {
+                            path: parts[1].to_string(),
+                            label: dev.to_string(),
+                            has_media: true,
+                        });
+                    }
+                }
+            }
+        }
+
+        drives
+    }
 }

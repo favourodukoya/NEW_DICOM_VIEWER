@@ -65,10 +65,10 @@ pub fn get_orthanc_config_path(app: &AppHandle) -> Result<PathBuf> {
 
     let config_path = config_dir.join("orthanc.json");
 
-    if !config_path.exists() {
-        let config = build_orthanc_config(&storage_dir, &db_dir);
-        std::fs::write(&config_path, config)?;
-    }
+    // Always regenerate the config so performance tuning and setting changes
+    // take effect without requiring a manual file deletion.
+    let config = build_orthanc_config(&storage_dir, &db_dir);
+    std::fs::write(&config_path, config)?;
 
     Ok(config_path)
 }
@@ -82,7 +82,7 @@ fn build_orthanc_config(storage_dir: &PathBuf, db_dir: &PathBuf) -> String {
   "DicomPort": 4242,
   "AuthenticationEnabled": false,
   "RemoteAccessAllowed": true,
-  "HttpCompressionEnabled": true,
+  "HttpCompressionEnabled": false,
   "Plugins": ["./DicomWebPlugin"],
   "DicomWeb": {{
     "Enable": true,
@@ -103,6 +103,10 @@ fn build_orthanc_config(storage_dir: &PathBuf, db_dir: &PathBuf) -> String {
   "LogLevel": "WARNING",
   "HttpVerbose": false,
   "KeepAlive": true,
+  "TcpNoDelay": true,
+  "HttpThreadsCount": 64,
+  "HttpRequestTimeout": 0,
+  "ConcurrentJobs": 4,
   "MaximumStorageSize": 0,
   "MaximumPatientCount": 0
 }}"#,

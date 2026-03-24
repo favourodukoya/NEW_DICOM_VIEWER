@@ -46,26 +46,28 @@ window.config = {
   strictZSpacingForVolumeViewport: false,
 
   // ── Web workers ─────────────────────────────────────────────────────────────
-  // Use as many workers as the CPU can sustain (capped at logical core count – 1).
-  // More workers = more parallel DICOM decode / decompress jobs.
+  // Use all available cores minus one (left for the main thread / UI).
+  // Each worker independently decodes / decompresses one DICOM frame.
   maxNumberOfWebWorkers: Math.max(2, (navigator.hardwareConcurrency || 4) - 1),
 
   // ── Request concurrency ──────────────────────────────────────────────────────
-  // High interaction concurrency so windowing/pan/zoom stay responsive while
-  // volume slices are still streaming in.
-  // Prefetch is kept lower to avoid saturating the local Orthanc HTTP server.
+  // interaction: frames the user is actively viewing — keep high so panning/
+  //   zooming never waits for a network queue.
+  // prefetch: aggressive parallel background loading — Orthanc is local so
+  //   localhost bandwidth is effectively unlimited; fill the worker pipeline.
+  // thumbnail: moderate — thumbnails matter for the study list UX.
+  // compute: enough for segmentation / MPR compute tasks.
   maxNumRequests: {
-    interaction: 128,
+    interaction: 256,
     thumbnail: 32,
-    prefetch: 16,
+    prefetch: 64,
     compute: 8,
   },
 
   // ── Volume cache ─────────────────────────────────────────────────────────────
-  // 2 GB GPU-side cache for decoded volumes.  A typical CT study (512×512×300)
-  // is ~150 MB decoded; this fits ~13 studies before eviction kicks in.
-  // Adjust down if the device has less than 8 GB of system RAM.
-  maxCacheSize: 2 * 1024 * 1024 * 1024,
+  // 3 GB GPU-side cache: ~20 typical CT studies (512×512×300 ≈ 150 MB each).
+  // Uses system RAM-backed GPU buffers; safe on any machine with ≥8 GB RAM.
+  maxCacheSize: 3 * 1024 * 1024 * 1024,
 
   // ─── Extensions & Modes ──────────────────────────────────────────────────────
   extensions: ['@ukubona/extension-ukubona'],
@@ -93,6 +95,22 @@ window.config = {
         supportsWildcard: true,
         omitQuotationForMultipartRequest: true,
         bulkDataURI: { enabled: true },
+        // ── Parallel frame retrieval ───────────────────────────────────────────
+        // singlepart: true  → each frame fetched as a plain GET (no multipart
+        // boundary parsing overhead in the WADO image loader). Orthanc supports
+        // this natively via the /frames/{n}/rendered or direct single-frame path.
+        // This eliminates the multipart-MIME decode step per request, which is a
+        // meaningful CPU saving on large CT series.
+        singlepart: 'bulkdata',
+        // retrieveOptions: controls how cornerstoneWADOImageLoader batches
+        // requests.  Setting a high parallelism matches our inflated prefetch
+        // pool so frames stream as fast as Orthanc can serve them.
+        retrieveOptions: {
+          default: {
+            framesPerRequest: 1,
+            parallelImageRequestsPerSeries: 12,
+          },
+        },
       },
     },
     {

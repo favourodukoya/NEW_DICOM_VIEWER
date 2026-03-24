@@ -3,6 +3,7 @@ import StudyCardGrid from './components/StudyCardGrid';
 import ReportManager from './components/ReportManager';
 import UkubonaAIModal from './components/UkubonaAIModal';
 import SettingsPage from './components/SettingsPage';
+import PacsStudyList from './components/PacsStudyList';
 import { isAuthenticated } from './components/LoginPage';
 
 /** Parse query params from the current URL synchronously (works with BrowserRouter). */
@@ -144,6 +145,11 @@ export default function getCustomizationModule() {
             {
               path: '/settings-panel',
               children: () => <SettingsPageStandalone />,
+              private: false,
+            },
+            {
+              path: '/pacs-study-list',
+              children: () => <PacsStudyList />,
               private: false,
             },
           ],

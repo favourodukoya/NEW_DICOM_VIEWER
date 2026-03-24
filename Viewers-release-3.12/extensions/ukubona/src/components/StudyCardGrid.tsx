@@ -3,7 +3,43 @@ import { useNavigate } from 'react-router-dom';
 import StudyCard from './StudyCard';
 import LoginPage, { isAuthenticated, clearSession } from './LoginPage';
 import ModeSelectModal, { getApplicableModes, ViewerMode } from './ModeSelectModal';
+import PacsModal from './PacsModal';
 import * as tauri from '../tauriBridge';
+
+// ─── Ephemeral study tracking ─────────────────────────────────────────────────
+// Studies opened via Open DICOM/ZIP/Folder/CD/deep-link are "ephemeral":
+// they are uploaded to storage for viewing but removed automatically when closed.
+// The list of ephemeral study UIDs survives crashes (stored in localStorage)
+// so that orphans are cleaned up on the next startup.
+
+const EPHEMERAL_KEY = 'ukubona_ephemeral_studies';
+
+function getEphemeralUids(): string[] {
+  try { return JSON.parse(localStorage.getItem(EPHEMERAL_KEY) || '[]'); } catch { return []; }
+}
+function addEphemeralUids(uids: string[]) {
+  if (!uids.length) return;
+  const existing = new Set(getEphemeralUids());
+  uids.forEach(u => existing.add(u));
+  try { localStorage.setItem(EPHEMERAL_KEY, JSON.stringify([...existing])); } catch {}
+}
+function removeEphemeralUids(uids: string[]) {
+  const existing = new Set(getEphemeralUids());
+  uids.forEach(u => existing.delete(u));
+  try { localStorage.setItem(EPHEMERAL_KEY, JSON.stringify([...existing])); } catch {}
+}
+function clearEphemeralUids() {
+  try { localStorage.removeItem(EPHEMERAL_KEY); } catch {}
+}
+
+async function deleteEphemeralUids(uids: string[]) {
+  if (!uids.length) return;
+  await Promise.allSettled(uids.map(uid =>
+    tauri.isTauri()
+      ? tauri.deleteStudyByUid(uid)
+      : tauri.deleteStudyByUidHttp(uid)
+  ));
+}
 
 interface StudyCardGridProps {
   dataPath?: string;
@@ -41,7 +77,12 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   const dragCounter = useRef(0); // tracks nested enter/leave so overlay doesn't flicker
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutHasWindows, setLogoutHasWindows] = useState(false);
+  const [showPacs, setShowPacs] = useState(false);
+  const [showPersistModal, setShowPersistModal] = useState(false);
+  const [opticalDrives, setOpticalDrives] = useState<tauri.OpticalDrive[]>([]);
+  const [cdLoading, setCdLoading] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const zipInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
   // ── Fetch studies ───────────────────────────────────────────────────────────
@@ -115,6 +156,68 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     if (authed) fetchStudies();
   }, [authed, fetchStudies]);
 
+  // ── Ephemeral study cleanup ──────────────────────────────────────────────────
+  // On mount: delete any ephemeral studies left over from a previous crashed session.
+  // On beforeunload / Tauri close: delete all current ephemeral studies.
+  useEffect(() => {
+    if (!authed) return;
+
+    // Startup cleanup — runs once after studies are loaded
+    const orphans = getEphemeralUids();
+    if (orphans.length) {
+      deleteEphemeralUids(orphans).then(() => {
+        clearEphemeralUids();
+        setTimeout(() => fetchStudies(), 600);
+      });
+    }
+
+    // beforeunload: best-effort sync cleanup via synchronous XHR to Orthanc
+    const handleUnload = () => {
+      const uids = getEphemeralUids();
+      if (!uids.length) return;
+      const base = tauri.getOrthancBase();
+      // For each uid, send a synchronous find+delete (browsers allow sync XHR in unload)
+      for (const uid of uids) {
+        try {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', `${base}/tools/find`, false);
+          xhr.setRequestHeader('Content-Type', 'application/json');
+          xhr.send(JSON.stringify({ Level: 'Study', Query: { StudyInstanceUID: uid } }));
+          const ids: string[] = JSON.parse(xhr.responseText || '[]');
+          for (const id of ids) {
+            const del = new XMLHttpRequest();
+            del.open('DELETE', `${base}/studies/${id}`, false);
+            del.send();
+          }
+        } catch { /* best-effort */ }
+      }
+      clearEphemeralUids();
+    };
+    window.addEventListener('beforeunload', handleUnload);
+
+    // Tauri-specific: intercept window close to do async cleanup before allowing close
+    let unlisten: (() => void) | undefined;
+    if (tauri.isTauri()) {
+      (async () => {
+        try {
+          const { getCurrentWindow } = await import('@tauri-apps/api/window');
+          unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
+            event.preventDefault();
+            const uids = getEphemeralUids();
+            await deleteEphemeralUids(uids);
+            clearEphemeralUids();
+            getCurrentWindow().destroy();
+          });
+        } catch { /* not critical */ }
+      })();
+    }
+
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      unlisten?.();
+    };
+  }, [authed, fetchStudies]);
+
   // ── Deep-link / "Open with" file handler ────────────────────────────────────
   // Tauri emits 'ukubona://open-files' with an array of file paths when the app
   // is launched by double-clicking a .dcm or .zip file, or via the ukubona:// URI scheme.
@@ -125,24 +228,62 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
       try {
         const { listen } = await import('@tauri-apps/api/event');
         unlisten = await listen<string[]>('ukubona://open-files', async event => {
-          const paths: string[] = event.payload ?? [];
-          if (!paths.length) return;
-          for (const p of paths) {
-            const lower = p.toLowerCase();
-            // Strip ukubona:// or file:// prefix if present
-            const filePath = p.replace(/^(ukubona:\/\/open\?path=|file:\/\/\/?)/, '');
-            const name = filePath.split(/[\\/]/).pop() ?? filePath;
+          const rawPaths: string[] = event.payload ?? [];
+          if (!rawPaths.length) return;
+          // Strip ukubona:// or file:// prefix if present
+          const paths = rawPaths.map(p => p.replace(/^(ukubona:\/\/open\?path=|file:\/\/\/?)/, ''));
+          const label = paths.length === 1
+            ? (paths[0].split(/[\\/]/).pop() ?? paths[0])
+            : `${paths.length} files`;
+          const id = Math.random().toString(36).slice(2);
+          setUploadJobs(prev => [...prev, { id, name: label, status: 'uploading' }]);
+          try {
+            const results = await tauri.uploadDicomPaths(paths);
+            const uids = results.filter(r => r.success && r.study_uid).map(r => r.study_uid);
+            addEphemeralUids(uids);
+            setUploadJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'success' } : j));
+            setTimeout(() => fetchStudies(), 600);
+          } catch (e) {
+            setUploadJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'error', error: String(e) } : j));
+          }
+          setTimeout(() => setUploadJobs(prev => prev.filter(j => j.id !== id)), 4000);
+        });
+      } catch { /* not in Tauri or event API unavailable */ }
+    })();
+    return () => { unlisten?.(); };
+  }, [fetchStudies]);
+
+  // ── Tauri native file drop ────────────────────────────────────────────────────
+  // Tauri v2 intercepts OS file drops before the browser sees them.
+  // e.dataTransfer.files is always empty. Use onDragDropEvent() instead.
+  useEffect(() => {
+    if (!tauri.isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+        unlisten = await getCurrentWebview().onDragDropEvent(async event => {
+          const payload = event.payload as { type: string; paths?: string[] };
+          if (payload.type === 'enter') {
+            dragCounter.current += 1;
+            setDragging(true);
+          } else if (payload.type === 'leave') {
+            dragCounter.current = 0;
+            setDragging(false);
+          } else if (payload.type === 'drop') {
+            dragCounter.current = 0;
+            setDragging(false);
+            const paths = payload.paths ?? [];
+            if (!paths.length) return;
+            const label = paths.length === 1
+              ? (paths[0].split(/[\\/]/).pop() ?? paths[0])
+              : `${paths.length} files`;
             const id = Math.random().toString(36).slice(2);
-            setUploadJobs(prev => [...prev, { id, name, status: 'uploading' }]);
+            setUploadJobs(prev => [...prev, { id, name: label, status: 'uploading' }]);
             try {
-              // Read file as base64 via Tauri fs plugin internals
-              const inv = (window as any).__TAURI_INTERNALS__.invoke;
-              const b64: string = await inv('plugin:fs|read_file', { path: filePath, options: { encoding: 'base64' } });
-              if (lower.endsWith('.zip')) {
-                await tauri.uploadZip(b64, name);
-              } else {
-                await tauri.uploadDicomFiles([{ name, data: b64 }]);
-              }
+              const results = await tauri.uploadDicomPaths(paths);
+              const uids = results.filter(r => r.success && r.study_uid).map(r => r.study_uid);
+              addEphemeralUids(uids);
               setUploadJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'success' } : j));
               setTimeout(() => fetchStudies(), 600);
             } catch (e) {
@@ -151,7 +292,7 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
             setTimeout(() => setUploadJobs(prev => prev.filter(j => j.id !== id)), 4000);
           }
         });
-      } catch { /* not in Tauri or event API unavailable */ }
+      } catch { /* not Tauri */ }
     })();
     return () => { unlisten?.(); };
   }, [fetchStudies]);
@@ -166,6 +307,40 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
       }).catch(() => {});
     }
   }, []);
+
+  // ── Optical drive polling ────────────────────────────────────────────────────
+  // Poll every 4 seconds; only when the study list is visible (not in viewer).
+  useEffect(() => {
+    if (!tauri.isTauri()) return;
+    const poll = async () => {
+      try {
+        const drives = await tauri.listOpticalDrives();
+        setOpticalDrives(drives);
+      } catch { setOpticalDrives([]); }
+    };
+    poll();
+    const timer = setInterval(poll, 4000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const handleLoadFromCd = useCallback(async (drive: tauri.OpticalDrive) => {
+    if (!drive.has_media) return;
+    setCdLoading(drive.path);
+    const id = Math.random().toString(36).slice(2);
+    setUploadJobs(prev => [...prev, { id, name: `CD/DVD (${drive.label})`, status: 'uploading' }]);
+    try {
+      const results = await tauri.uploadFolder(drive.path);
+      const uids = results.filter(r => r.success && r.study_uid).map(r => r.study_uid);
+      addEphemeralUids(uids);
+      setUploadJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'success' } : j));
+      setTimeout(() => fetchStudies(), 600);
+    } catch (e) {
+      setUploadJobs(prev => prev.map(j => j.id === id ? { ...j, status: 'error', error: String(e) } : j));
+    } finally {
+      setCdLoading(null);
+      setTimeout(() => setUploadJobs(prev => prev.filter(j => j.id !== id)), 5000);
+    }
+  }, [fetchStudies]);
 
   // ── Study open logic ────────────────────────────────────────────────────────
   const openStudy = useCallback(async (study: StudyItem, mode: ViewerMode) => {
@@ -248,6 +423,15 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     };
   }, [studies, handleStudyClick, navigate]);
 
+  // Listen for refresh requests from PACS results window after retrieval
+  useEffect(() => {
+    const bc = new BroadcastChannel('ukubona_refresh');
+    bc.onmessage = (e) => {
+      if (e.data?.action === 'refresh') setTimeout(() => fetchStudies(), 800);
+    };
+    return () => bc.close();
+  }, [fetchStudies]);
+
   const handleDelete = useCallback((study: StudyItem) => {
     setDeleteConfirm(study);
   }, []);
@@ -328,14 +512,18 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     setTimeout(() => setUploadJobs(prev => prev.filter(j => j.id !== id)), 4000);
   };
 
-  const handleDroppedFiles = useCallback(async (files: File[]) => {
+  const handleDroppedFiles = useCallback(async (files: File[], ephemeral = true) => {
     const zips = files.filter(f => f.name.toLowerCase().endsWith('.zip'));
     const dicoms = files.filter(f => !f.name.toLowerCase().endsWith('.zip'));
     for (const zip of zips) {
       const id = addJob(zip.name);
       try {
         const b64 = await tauri.fileToBase64(zip);
-        await tauri.uploadZip(b64, zip.name);
+        const results = await tauri.uploadZip(b64, zip.name);
+        if (ephemeral) {
+          const uids = results.filter(r => r.success && r.study_uid).map(r => r.study_uid);
+          addEphemeralUids(uids);
+        }
         finishJob(id, true);
       } catch (e) { finishJob(id, false, String(e)); }
     }
@@ -343,44 +531,66 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
       const id = addJob(`${dicoms.length} DICOM file(s)`);
       try {
         const uploads = await Promise.all(dicoms.map(async f => ({ name: f.name, data: await tauri.fileToBase64(f) })));
-        await tauri.uploadDicomFiles(uploads);
+        const results = await tauri.uploadDicomFiles(uploads);
+        if (ephemeral) {
+          const uids = results.filter(r => r.success && r.study_uid).map(r => r.study_uid);
+          addEphemeralUids(uids);
+        }
         finishJob(id, true);
       } catch (e) { finishJob(id, false, String(e)); }
     }
   }, []);
 
-  const handleFolderPick = useCallback(async () => {
+  const handleFolderPick = useCallback(async (ephemeral = true) => {
     try {
       const path = await tauri.openFolderDialog();
       if (!path) return;
       const id = addJob(`Folder: ${(path as string).split(/[\\/]/).pop()}`);
       try {
-        await tauri.uploadFolder(path as string);
+        const results = await tauri.uploadFolder(path as string);
+        if (ephemeral) {
+          const uids = results.filter(r => r.success && r.study_uid).map(r => r.study_uid);
+          addEphemeralUids(uids);
+        }
         finishJob(id, true);
       } catch (e) { finishJob(id, false, String(e)); }
     } catch (e) { console.error(e); }
   }, []);
 
-  // ── Drag-drop (whole page is the drop zone) ─────────────────────────────────
-  // dragCounter prevents the overlay from flickering when the pointer moves
-  // between child elements (each child fires dragLeave then dragEnter).
-  const onDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    dragCounter.current += 1;
-    if (dragCounter.current === 1) setDragging(true);
-  };
-  const onDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    dragCounter.current -= 1;
-    if (dragCounter.current === 0) setDragging(false);
-  };
-  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); };
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    dragCounter.current = 0;
-    setDragging(false);
-    handleDroppedFiles(Array.from(e.dataTransfer.files));
-  };
+  // ── Drag-drop (document-level listeners for Tauri webview compatibility) ────
+  // React div drag events are unreliable in Tauri webviews for OS file drops.
+  // Attaching directly to `document` ensures the browser sees the drag first.
+  useEffect(() => {
+    const onDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter.current += 1;
+      if (dragCounter.current === 1) setDragging(true);
+    };
+    const onDragLeave = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter.current -= 1;
+      if (dragCounter.current === 0) setDragging(false);
+    };
+    const onDragOver = (e: DragEvent) => { e.preventDefault(); };
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault();
+      dragCounter.current = 0;
+      setDragging(false);
+      if (e.dataTransfer?.files?.length) {
+        handleDroppedFiles(Array.from(e.dataTransfer.files));
+      }
+    };
+    document.addEventListener('dragenter', onDragEnter);
+    document.addEventListener('dragleave', onDragLeave);
+    document.addEventListener('dragover', onDragOver);
+    document.addEventListener('drop', onDrop);
+    return () => {
+      document.removeEventListener('dragenter', onDragEnter);
+      document.removeEventListener('dragleave', onDragLeave);
+      document.removeEventListener('dragover', onDragOver);
+      document.removeEventListener('drop', onDrop);
+    };
+  }, [handleDroppedFiles]);
 
   // ── Filter ──────────────────────────────────────────────────────────────────
   const filtered = studies.filter(s => {
@@ -406,10 +616,6 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   return (
     <div
       className="relative flex min-h-screen flex-col bg-[#0f1117]"
-      onDragEnter={onDragEnter}
-      onDragLeave={onDragLeave}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
     >
       {/* Full-page drag overlay */}
       {dragging && (
@@ -457,14 +663,106 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
 
         {/* Actions */}
         <div className="flex items-center gap-1.5">
-          <button onClick={() => fileInputRef.current?.click()} className="rounded-md border border-[#1e2433] bg-[#161b26] px-2.5 py-1.5 text-xs text-[#9ca3af] hover:text-white hover:border-[#2a3040] transition" title="Upload DICOM / ZIP files">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="inline mr-1"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-            Upload Files
+          {/* Open DICOM file */}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex flex-col items-start rounded-md border border-[#1e2433] bg-[#161b26] px-2.5 py-1.5 text-xs text-[#9ca3af] hover:text-white hover:border-[#2a3040] transition"
+            title="Open DICOM file(s) — closes when viewer is done"
+          >
+            <span className="flex items-center gap-1">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              Open DICOM file
+            </span>
+            <span className="mt-0.5 text-[9px] text-[#374151]">.dcm · quick view</span>
           </button>
-          <button onClick={handleFolderPick} className="rounded-md border border-[#1e2433] bg-[#161b26] px-2.5 py-1.5 text-xs text-[#9ca3af] hover:text-white hover:border-[#2a3040] transition" title="Upload folder">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="inline mr-1"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" /></svg>
-            Upload Folder
+
+          {/* Open ZIP file */}
+          <button
+            onClick={() => zipInputRef.current?.click()}
+            className="flex flex-col items-start rounded-md border border-[#1e2433] bg-[#161b26] px-2.5 py-1.5 text-xs text-[#9ca3af] hover:text-white hover:border-[#2a3040] transition"
+            title="Open ZIP archive — closes when viewer is done"
+          >
+            <span className="flex items-center gap-1">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              Open ZIP File
+            </span>
+            <span className="mt-0.5 text-[9px] text-[#374151]">.zip · quick view</span>
           </button>
+
+          {/* Open Folder */}
+          <button
+            onClick={() => handleFolderPick()}
+            className="flex flex-col items-start rounded-md border border-[#1e2433] bg-[#161b26] px-2.5 py-1.5 text-xs text-[#9ca3af] hover:text-white hover:border-[#2a3040] transition"
+            title="Open folder — closes when viewer is done"
+          >
+            <span className="flex items-center gap-1">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+              </svg>
+              Open Folder
+            </span>
+            <span className="mt-0.5 text-[9px] text-[#374151]">Scans subfolders · quick view</span>
+          </button>
+
+          <div className="mx-0.5 h-4 w-px bg-[#1e2433]" />
+
+          {/* Load from PACS */}
+          <button
+            onClick={() => setShowPacs(true)}
+            className="flex flex-col items-start rounded-md border border-[#1e2433] bg-[#161b26] px-2.5 py-1.5 text-xs text-[#9ca3af] hover:border-[#2a3040] hover:text-white transition"
+            title="Load from PACS"
+          >
+            <span className="flex items-center gap-1.5">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <rect x="2" y="3" width="20" height="14" rx="2" />
+                <path d="M8 21h8M12 17v4" />
+                <circle cx="9" cy="10" r="1.5" />
+                <path d="M13 8h4M13 12h3" />
+              </svg>
+              Load from PACS
+            </span>
+            <span className="mt-0.5 text-[9px] text-[#374151]">Query remote server</span>
+          </button>
+
+          {/* Load from CD — only shown when an optical drive is detected */}
+          {opticalDrives.map(drive => (
+            <button
+              key={drive.path}
+              onClick={() => handleLoadFromCd(drive)}
+              disabled={cdLoading === drive.path || !drive.has_media}
+              title={drive.has_media ? `Load from ${drive.label} (CD/DVD)` : `${drive.label}: No disc inserted`}
+              className={[
+                'flex flex-col items-start rounded-md border px-2.5 py-1.5 text-xs transition',
+                drive.has_media
+                  ? 'border-[#3b82f6]/30 bg-[#3b82f6]/8 text-[#60a5fa] hover:border-[#3b82f6]/60 hover:bg-[#3b82f6]/15'
+                  : 'border-[#1e2433] bg-[#161b26] text-[#4b5563] cursor-not-allowed',
+              ].join(' ')}
+            >
+              <span className="flex items-center gap-1.5">
+                {cdLoading === drive.path ? (
+                  <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <circle cx="12" cy="12" r="10" />
+                    <circle cx="12" cy="12" r="3" />
+                    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+                  </svg>
+                )}
+                Load from {drive.label}
+              </span>
+              <span className={`mt-0.5 text-[9px] ${drive.has_media ? 'text-[#3b82f6]/50' : 'text-[#374151]'}`}>
+                {drive.has_media ? 'DICOM disc · quick view' : 'No disc inserted'}
+              </span>
+            </button>
+          ))}
+
           <div className="mx-1 h-4 w-px bg-[#1e2433]" />
           <button onClick={fetchStudies} className="rounded-md p-1.5 text-[#6b7280] hover:text-white transition" title="Refresh">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
@@ -521,6 +819,16 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
                 {activeUploads} uploading
               </span>
             )}
+            <button
+              onClick={() => setShowPersistModal(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-[#2a3040] bg-[#161b26] px-3 py-1 text-xs font-medium text-[#9ca3af] transition hover:border-[#3b82f6]/40 hover:text-white"
+              title="Add studies permanently to your library"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Add to Studies List
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-0.5">
@@ -539,6 +847,25 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
               </button>
             ))}
           </div>
+        </div>
+
+        {/* ── Drop hint ────────────────────────────────────────────────── */}
+        <div className={[
+          'mb-3 flex items-center justify-center gap-2 rounded-lg border border-dashed py-2 text-xs transition-all duration-150',
+          dragging
+            ? 'border-[#3b82f6]/60 bg-[#3b82f6]/8 text-[#60a5fa] shadow-[0_0_20px_rgba(59,130,246,0.12)]'
+            : 'border-[#1e2433]/60 text-[#374151]',
+        ].join(' ')}>
+          {dragging ? (
+            <>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              Release to import
+            </>
+          ) : (
+            'Drop DICOM files or ZIP here'
+          )}
         </div>
 
         {/* Grid */}
@@ -575,7 +902,9 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
       </main>
 
       {/* Hidden inputs */}
-      <input ref={fileInputRef} type="file" accept=".dcm,.DCM,.dicom,.zip,.ZIP" multiple className="hidden"
+      <input ref={fileInputRef} type="file" accept=".dcm,.DCM,.dicom" multiple className="hidden"
+        onChange={e => { handleDroppedFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
+      <input ref={zipInputRef} type="file" accept=".zip,.ZIP" multiple className="hidden"
         onChange={e => { handleDroppedFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
 
       {modeModal && (
@@ -603,6 +932,24 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
             </div>
           </div>
         </div>
+      )}
+
+      {/* Persist modal — "Add to Studies List" */}
+      {showPersistModal && (
+        <PersistModal
+          onClose={() => setShowPersistModal(false)}
+          onUploadFiles={async files => { await handleDroppedFiles(files, false); }}
+          onUploadFolder={async () => { await handleFolderPick(false); setShowPersistModal(false); }}
+        />
+      )}
+
+      {/* PACS modal */}
+      {showPacs && (
+        <PacsModal
+          onClose={() => setShowPacs(false)}
+          onStudyRetrieved={() => { setTimeout(fetchStudies, 1500); }}
+          onOpenSettings={() => { setShowPacs(false); handleOpenSettings(); }}
+        />
       )}
 
       {/* Logout confirmation dialog */}
@@ -646,6 +993,7 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
   );
 }
 
+
 function EmptyState({ hasSearch, onUpload }: { hasSearch: boolean; onUpload: () => void }) {
   return (
     <div className="flex flex-col items-center gap-3 pt-20">
@@ -653,12 +1001,158 @@ function EmptyState({ hasSearch, onUpload }: { hasSearch: boolean; onUpload: () 
         <rect x="2" y="3" width="20" height="18" rx="2" /><path d="M8 10h8M8 14h5" />
       </svg>
       <p className="text-sm text-[#9ca3af]">{hasSearch ? 'No matching studies' : 'No studies loaded'}</p>
-      <p className="text-xs text-[#4b5563]">{hasSearch ? 'Try clearing filters' : 'Drop files here or use upload buttons'}</p>
+      <p className="text-xs text-[#4b5563]">{hasSearch ? 'Try clearing filters' : 'Use Open DICOM file, Open Folder, or drag & drop'}</p>
       {!hasSearch && (
         <button onClick={onUpload} className="mt-2 rounded-lg bg-[#3b82f6] px-4 py-2 text-sm font-medium text-white hover:bg-[#2563eb] transition">
-          Upload DICOM Files
+          Open DICOM File
         </button>
       )}
+    </div>
+  );
+}
+
+// ─── PersistModal ─────────────────────────────────────────────────────────────
+// "Add to Studies List" — uploads are permanent (not ephemeral).
+
+interface PersistModalProps {
+  onClose: () => void;
+  onUploadFiles: (files: File[]) => Promise<void>;
+  onUploadFolder: () => Promise<void>;
+}
+
+function PersistModal({ onClose, onUploadFiles, onUploadFolder }: PersistModalProps) {
+  const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const dragCounter = useRef(0);
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = 0;
+    setDragging(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (!files.length) return;
+    setBusy(true);
+    await onUploadFiles(files);
+    setBusy(false);
+    onClose();
+  };
+
+  const handleFileInput = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length) return;
+    setBusy(true);
+    await onUploadFiles(files);
+    setBusy(false);
+    onClose();
+    e.target.value = '';
+  };
+
+  const handleFolder = async () => {
+    setBusy(true);
+    await onUploadFolder();
+    setBusy(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      onClick={e => e.target === e.currentTarget && onClose()}
+    >
+      <div className="w-full max-w-md rounded-xl border border-[#1e2433] bg-[#0d1117] shadow-2xl">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-[#1e2433] px-5 py-4">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#3b82f6]/10">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-white">Add to Studies List</h2>
+              <p className="text-[11px] text-[#4b5563]">Studies added here stay in your library permanently</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="rounded-lg p-1.5 text-[#4b5563] hover:bg-white/5 hover:text-white transition">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 space-y-3">
+          {/* Drag-drop zone */}
+          <div
+            onDragEnter={e => { e.preventDefault(); dragCounter.current += 1; setDragging(true); }}
+            onDragLeave={e => { e.preventDefault(); dragCounter.current -= 1; if (dragCounter.current === 0) setDragging(false); }}
+            onDragOver={e => e.preventDefault()}
+            onDrop={handleDrop}
+            className={[
+              'flex flex-col items-center justify-center gap-2.5 rounded-xl border-2 border-dashed py-8 transition-all duration-150 cursor-pointer',
+              dragging
+                ? 'border-[#3b82f6]/70 bg-[#3b82f6]/8 shadow-[0_0_24px_rgba(59,130,246,0.1)]'
+                : 'border-[#1e2433] hover:border-[#2a3040]',
+            ].join(' ')}
+            onClick={() => fileRef.current?.click()}
+          >
+            <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${dragging ? 'bg-[#3b82f6]/15' : 'bg-[#161b26]'} transition`}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={dragging ? '#60a5fa' : '#6b7280'} strokeWidth="1.5">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-medium text-[#d1d5db]">
+                {dragging ? 'Release to add' : 'Drag & drop files here'}
+              </p>
+              <p className="mt-0.5 text-xs text-[#4b5563]">or click to browse</p>
+            </div>
+            <p className="text-[10px] text-[#374151]">Individual .dcm files or .zip archives · No size limit</p>
+          </div>
+
+          {/* Upload File button */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={busy}
+              className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-[#1e2433] bg-[#161b26] py-2.5 text-sm text-[#9ca3af] transition hover:border-[#2a3040] hover:text-white disabled:opacity-50"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              Upload File
+            </button>
+            <button
+              onClick={handleFolder}
+              disabled={busy}
+              className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-[#1e2433] bg-[#161b26] py-2.5 text-sm text-[#9ca3af] transition hover:border-[#2a3040] hover:text-white disabled:opacity-50"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+              </svg>
+              Upload Folder
+            </button>
+          </div>
+
+          {/* Hint text under each button */}
+          <div className="flex gap-2 text-[10px] text-[#374151]">
+            <span className="flex-1 text-center">.dcm files and .zip archives supported</span>
+            <span className="flex-1 text-center">Scans folder and subfolders for DICOM files</span>
+          </div>
+
+          {busy && (
+            <div className="flex items-center justify-center gap-2 py-1 text-xs text-[#6b7280]">
+              <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#3b82f6] border-t-transparent" />
+              Importing...
+            </div>
+          )}
+        </div>
+      </div>
+
+      <input ref={fileRef} type="file" accept=".dcm,.DCM,.dicom,.zip,.ZIP" multiple className="hidden" onChange={handleFileInput} />
     </div>
   );
 }
