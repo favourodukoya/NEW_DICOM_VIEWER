@@ -92,13 +92,13 @@ fn build_orthanc_config(storage_dir: &PathBuf, db_dir: &PathBuf) -> String {
     "Ssl": false,
     "QidoCaseSensitive": false,
     "Host": "127.0.0.1",
-    "StudiesMetadata": "MainDicomTags",
+    "StudiesMetadata": "Full",
     "SeriesMetadata": "Full"
   }},
-  "Cors": {{
-    "AllowedOrigins": ["*"],
-    "AllowedHeaders": ["*"],
-    "AllowedMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+  "HttpHeadersToAdd": {{
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Accept, Content-Type, Authorization, X-Requested-With"
   }},
   "LogLevel": "WARNING",
   "HttpVerbose": false,
@@ -181,8 +181,18 @@ async fn get_study_details(client: &reqwest::Client, orthanc_id: &str) -> Result
         .json()
         .await?;
 
+    tracing::debug!("Orthanc study {orthanc_id} raw: {}", serde_json::to_string(&meta).unwrap_or_default());
+
     let main_tags = &meta["MainDicomTags"];
     let patient_tags = &meta["PatientMainDicomTags"];
+
+    // ModalitiesInStudy comes back under RequestedTags when queried via ?requestedTags=
+    // but may also appear in MainDicomTags on some Orthanc builds.
+    let modalities = meta["RequestedTags"]["ModalitiesInStudy"]
+        .as_str()
+        .or_else(|| main_tags["ModalitiesInStudy"].as_str())
+        .unwrap_or("")
+        .to_string();
 
     Ok(OrthancStudy {
         orthanc_id: orthanc_id.to_string(),
@@ -203,10 +213,7 @@ async fn get_study_details(client: &reqwest::Client, orthanc_id: &str) -> Result
             .unwrap_or("")
             .to_string(),
         study_date: main_tags["StudyDate"].as_str().unwrap_or("").to_string(),
-        modalities: meta["RequestedTags"]["ModalitiesInStudy"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
+        modalities,
         series_count: meta["Series"].as_array().map(|a| a.len()).unwrap_or(0),
         instance_count: meta["Instances"].as_array().map(|a| a.len()).unwrap_or(0),
         last_update: meta["LastUpdate"].as_str().unwrap_or("").to_string(),

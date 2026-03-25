@@ -312,6 +312,20 @@ pub async fn get_orthanc_url() -> String {
     orthanc::get_orthanc_url()
 }
 
+/// Return the port of the local CORS reverse proxy (0 if not yet started).
+#[tauri::command]
+pub async fn get_cors_proxy_port() -> u16 {
+    crate::cors_proxy::get_proxy_port()
+}
+
+/// Return the absolute path to the settings.json file.
+/// Useful for external config tools that want to read or modify Orthanc port/host.
+#[tauri::command]
+pub async fn get_settings_path_cmd(app: AppHandle) -> Result<String, String> {
+    let path = storage::get_settings_path(&app).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 // ─── System / Status Commands ─────────────────────────────────────────────────
 
 #[tauri::command]
@@ -393,13 +407,18 @@ pub async fn query_pacs(config: PacsConfig, query: PacsQuery) -> Result<Vec<Pacs
         .map_err(|e| e.to_string())?;
 
     // C-FIND via Orthanc
+    // NOTE: C-FIND only returns tags that are included in the Query object.
+    // An empty string means "match any value and return it".
+    // StudyInstanceUID MUST be included so we can identify and retrieve studies.
     let find_body = serde_json::json!({
         "Level": "Study",
         "Query": {
             "PatientName": query.patient_name.unwrap_or_default(),
             "StudyDescription": query.description.unwrap_or_default(),
             "StudyDate": query.date_range.unwrap_or_default(),
-            "ModalitiesInStudy": query.modality.unwrap_or_default()
+            "ModalitiesInStudy": query.modality.unwrap_or_default(),
+            "StudyInstanceUID": "",
+            "Modality": ""
         }
     });
 
@@ -418,9 +437,14 @@ pub async fn query_pacs(config: PacsConfig, query: PacsQuery) -> Result<Vec<Pacs
 
     // Answers are at /queries/{id}/answers
     let query_id = results["ID"].as_str().unwrap_or("");
-    let answers: Vec<serde_json::Value> = client
+    if query_id.is_empty() {
+        return Err("PACS query did not return a query ID".to_string());
+    }
+
+    // First get list of answer indices
+    let answer_indices: Vec<serde_json::Value> = client
         .get(format!(
-            "{}/queries/{query_id}/answers?expand",
+            "{}/queries/{query_id}/answers",
             orthanc::get_orthanc_url()
         ))
         .send()
@@ -429,6 +453,30 @@ pub async fn query_pacs(config: PacsConfig, query: PacsQuery) -> Result<Vec<Pacs
         .json()
         .await
         .map_err(|e| e.to_string())?;
+
+    // Fetch each answer's content individually (more reliable than ?expand)
+    let mut answers: Vec<serde_json::Value> = Vec::new();
+    for idx_val in &answer_indices {
+        let idx = idx_val.as_u64().or_else(|| idx_val.as_str().and_then(|s| s.parse().ok())).unwrap_or(0);
+        match client
+            .get(format!(
+                "{}/queries/{query_id}/answers/{idx}/content",
+                orthanc::get_orthanc_url()
+            ))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if let Ok(content) = resp.json::<serde_json::Value>().await {
+                    // Wrap in a Content object so the extraction logic is consistent
+                    answers.push(serde_json::json!({ "Content": content }));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch PACS answer {idx}: {e}");
+            }
+        }
+    }
 
     // Orthanc ?expand wraps each answer as:
     //   { "Content": { "PatientName": { "Alphabetic": "SMITH^JOHN" }, "StudyDate": "20240101", ... }, "Index": N }
@@ -445,38 +493,60 @@ pub async fn query_pacs(config: PacsConfig, query: PacsQuery) -> Result<Vec<Pacs
             // Orthanc ?expand puts data under "Content"; plain DICOM JSON has no wrapper.
             let content = if a["Content"].is_object() { &a["Content"] } else { a };
 
-            // Extract a plain string from any of the formats a PACS server might use:
-            //  1. Flat string:                   "SMITH^JOHN"
-            //  2. DICOM JSON PN Alphabetic:      { "Alphabetic": "SMITH^JOHN" }
-            //  3. DICOM JSON Value array:         { "Value": ["SMITH^JOHN"] }
-            //  4. DICOM JSON PN in Value array:   { "Value": [{ "Alphabetic": "SMITH^JOHN" }] }
-            //  5. Hex-tag form (raw DICOM JSON):  a["0010,0010"]["Value"][0]
+            // Extract a plain string from any of the formats a PACS server might use.
+            //
+            // Orthanc's /queries/{id}/answers/{idx}/content returns its own proprietary
+            // format where each tag is an object:
+            //   "0010,0010": { "Name": "PatientName", "Type": "String", "Value": "SMITH^JOHN" }
+            // Note: "Value" is a plain string here, NOT an array.
+            // Note: hex tags use lowercase letters (e.g. "0020,000d" not "0020,000D").
+            //
+            // Other PACS servers / Orthanc endpoints may use:
+            //   flat string:      content["PatientName"] = "SMITH^JOHN"
+            //   PN Alphabetic:    content["PatientName"] = { "Alphabetic": "..." }
+            //   DICOM JSON array: content["PatientName"] = { "Value": ["..."] }
+            //   DICOM JSON PN:    content["PatientName"] = { "Value": [{ "Alphabetic": "..." }] }
             let str_field = |friendly: &str, hex: &str| -> String {
-                let node = &content[friendly];
+                // Also try lowercase version of the hex tag (Orthanc uses lowercase hex)
+                let hex_lc = hex.to_lowercase();
+                let hex_lc = hex_lc.as_str();
 
-                // 1. Flat string
-                if let Some(s) = node.as_str() {
-                    return s.trim().to_string();
-                }
-                // 2. PN { "Alphabetic": "..." }
-                if let Some(s) = node["Alphabetic"].as_str() {
-                    return s.trim().to_string();
-                }
-                // 3. { "Value": ["..."] }
-                if let Some(s) = node["Value"][0].as_str() {
-                    return s.trim().to_string();
-                }
-                // 4. { "Value": [{ "Alphabetic": "..." }] }
-                if let Some(s) = node["Value"][0]["Alphabetic"].as_str() {
-                    return s.trim().to_string();
-                }
-                // 5. Hex tag DICOM JSON: a["0010,0010"]["Value"][0] (plain or PN)
-                if let Some(s) = a[hex]["Value"][0].as_str() {
-                    return s.trim().to_string();
-                }
-                if let Some(s) = a[hex]["Value"][0]["Alphabetic"].as_str() {
-                    return s.trim().to_string();
-                }
+                // Helper: extract string value from a tag node in any known format
+                let extract_node = |node: &serde_json::Value| -> Option<String> {
+                    // Flat string
+                    if let Some(s) = node.as_str() {
+                        return Some(s.trim().to_string());
+                    }
+                    // Orthanc proprietary: { "Name": "...", "Type": "String", "Value": "..." }
+                    // (Value is a plain string, not an array)
+                    if let Some(s) = node["Value"].as_str() {
+                        return Some(s.trim().to_string());
+                    }
+                    // PN Alphabetic: { "Alphabetic": "..." }
+                    if let Some(s) = node["Alphabetic"].as_str() {
+                        return Some(s.trim().to_string());
+                    }
+                    // DICOM JSON array: { "Value": ["..."] }
+                    if let Some(s) = node["Value"][0].as_str() {
+                        return Some(s.trim().to_string());
+                    }
+                    // DICOM JSON PN array: { "Value": [{ "Alphabetic": "..." }] }
+                    if let Some(s) = node["Value"][0]["Alphabetic"].as_str() {
+                        return Some(s.trim().to_string());
+                    }
+                    None
+                };
+
+                // Try friendly name first
+                if let Some(s) = extract_node(&content[friendly]) { return s; }
+                // Try hex tag (as provided, usually uppercase)
+                if let Some(s) = extract_node(&content[hex]) { return s; }
+                // Try hex tag lowercase (Orthanc uses lowercase hex in C-FIND responses)
+                if let Some(s) = extract_node(&content[hex_lc]) { return s; }
+                // Fallback: hex directly on `a` (format without Content wrapper)
+                if let Some(s) = extract_node(&a[hex]) { return s; }
+                if let Some(s) = extract_node(&a[hex_lc]) { return s; }
+
                 String::new()
             };
 

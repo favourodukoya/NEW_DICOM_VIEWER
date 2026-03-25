@@ -1,27 +1,37 @@
 /**
  * Ukubona Viewer — Orthanc DICOMweb configuration
  *
- * Dev mode  : rsbuild proxy at same origin handles /dicom-web → Orthanc (no CORS)
- * Prod Tauri: webview loads from tauri:// so direct Orthanc URL is fine
+ * Dev mode  : rsbuild proxy at same origin handles /dicom-web -> Orthanc (no CORS)
+ * Prod Tauri: local CORS proxy at http://127.0.0.1:18042 -> Orthanc (no CORS issues)
+ * Browser   : direct Orthanc URL
  *
  * @type {AppTypes.Config}
  */
 
 // Detect runtime context
 const _isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-const _isDevServer = window.location.protocol === 'http:';
+// In dev mode the page is served from the rsbuild dev server at localhost:NNNNN.
+// In production Tauri the page is served from http://tauri.localhost (with dangerousUseHttpScheme).
+// We detect dev mode by checking: hostname is NOT tauri.localhost AND protocol is http.
+const _isTauriHost = window.location.hostname === 'tauri.localhost';
+const _isDevServer = window.location.protocol === 'http:' && !_isTauriHost;
 
-// In dev mode (including Tauri dev), always use the rsbuild proxy to avoid CORS.
-// In production Tauri builds (tauri:// or https://tauri.localhost), hit Orthanc directly.
+// Dev mode : rsbuild proxy at same origin handles /dicom-web -> Orthanc (no CORS).
+// Prod Tauri: CORS reverse proxy started by the Rust backend on port 18042.
+//             This proxy forwards to Orthanc and adds CORS headers + handles OPTIONS.
+//             Works with both fetch() and XMLHttpRequest (which cornerstone WADO uses).
+// Browser   : direct Orthanc URL (no Tauri available).
 const _orthancBase = _isDevServer
   ? window.location.origin
-  : (() => {
-      try {
-        return localStorage.getItem('ukubona_orthanc_url') || 'http://127.0.0.1:8042';
-      } catch {
-        return 'http://127.0.0.1:8042';
-      }
-    })();
+  : _isTauri
+    ? 'http://127.0.0.1:18042'
+    : (() => {
+        try {
+          return localStorage.getItem('ukubona_orthanc_url') || 'http://127.0.0.1:8042';
+        } catch {
+          return 'http://127.0.0.1:8042';
+        }
+      })();
 
 window.config = {
   name: 'ukubona',

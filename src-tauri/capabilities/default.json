@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for Ukubona Viewer",
-  "windows": ["main", "report_*", "ai_*", "settings_*", "viewer_*"],
+  "windows": ["main", "report_*", "ai_*", "settings_*", "viewer_*", "pacs_*"],
   "permissions": [
     "core:default",
     "core:webview:allow-create-webview-window",

@@ -202,6 +202,14 @@ export interface OrthancStatus {
 export const getOrthancStatus = (): Promise<OrthancStatus> =>
   invoke('get_orthanc_status');
 
+/** Get the CORS proxy port (0 if not yet started). */
+export const getCorsProxyPort = (): Promise<number> =>
+  invoke<number>('get_cors_proxy_port');
+
+/** Returns the absolute path to settings.json — useful for diagnostics. */
+export const getSettingsPath = (): Promise<string> =>
+  invoke('get_settings_path_cmd');
+
 export const runCleanup = (maxStudies?: number): Promise<void> =>
   invoke('run_cleanup', { maxStudies });
 
@@ -253,6 +261,49 @@ export interface OpticalDrive {
 
 export const listOpticalDrives = (): Promise<OpticalDrive[]> =>
   invoke('list_optical_drives');
+
+// ─── Tauri Event helpers ─────────────────────────────────────────────────────
+// These use __TAURI_INTERNALS__ directly to avoid importing @tauri-apps/api/event
+// or @tauri-apps/api/window, which causes rspack to crash in dev (non-Tauri) mode.
+
+/** Listen to a Tauri event. Returns an unlisten function. */
+export async function tauriListen<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const listen = (window as any).__TAURI_INTERNALS__?.listen;
+  if (!listen) return () => {};
+  return listen(event, (ev: { payload: T }) => handler(ev.payload));
+}
+
+/**
+ * Register a handler that is called when the user tries to close the window.
+ * The handler runs before the window closes so it can do async cleanup.
+ * After the handler completes the window is destroyed.
+ * Returns an unlisten function.
+ */
+export async function onCloseRequested(handler: () => Promise<void>): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const listen = (window as any).__TAURI_INTERNALS__?.listen;
+  if (!listen) return () => {};
+  // tauri://close-requested fires before the window is destroyed.
+  // We prevent the default close, run cleanup, then destroy manually.
+  const unlisten: () => void = await listen('tauri://close-requested', async () => {
+    try {
+      // Prevent the automatic close so we can do async work first.
+      await (window as any).__TAURI_INTERNALS__.invoke('plugin:window|set_close_requested_handler', { value: true }).catch(() => {});
+    } catch { /* ok if unsupported */ }
+    try { await handler(); } catch { /* best-effort */ }
+    try {
+      await (window as any).__TAURI_INTERNALS__.invoke('plugin:window|destroy', {});
+    } catch {
+      // Fallback: just close via the window plugin
+      try { await (window as any).__TAURI_INTERNALS__.invoke('plugin:window|close', { label: 'main' }); } catch { /* ok */ }
+    }
+  });
+  return unlisten;
+}
 
 // ─── Tauri Window helpers ────────────────────────────────────────────────────
 
@@ -349,11 +400,39 @@ export function getOrthancUrl(): string {
   }
 }
 
-/** In dev mode use proxy to avoid CORS; in production Tauri use direct Orthanc URL. */
+// ── CORS proxy port for production Tauri ──────────────────────────────────────
+// The Rust backend starts a local CORS reverse proxy (preferring port 18042).
+// We resolve the actual port once and cache it for cases where 18042 was busy.
+const CORS_PROXY_DEFAULT_PORT = 18042;
+let _corsProxyPort: number = CORS_PROXY_DEFAULT_PORT;
+let _corsProxyResolved = false;
+
+function resolveCorsProxyPort(): void {
+  if (_corsProxyResolved || !isTauri()) return;
+  getCorsProxyPort()
+    .then(port => {
+      if (port > 0) _corsProxyPort = port;
+      _corsProxyResolved = true;
+    })
+    .catch(() => {});
+}
+
+// Kick off resolution immediately on module load
+if (isTauri()) resolveCorsProxyPort();
+
+/** Returns the base URL for Orthanc requests.
+ *  Dev mode:  rsbuild proxy at same origin (no CORS).
+ *  Prod Tauri: local CORS proxy at http://127.0.0.1:18042 (works with XHR + fetch).
+ *  Browser:   direct Orthanc URL.
+ */
 export function getOrthancBase(): string {
-  return window.location.protocol === 'http:'
-    ? window.location.origin
-    : getOrthancUrl();
+  const isTauriHost = window.location.hostname === 'tauri.localhost';
+  const isDevServer = window.location.protocol === 'http:' && !isTauriHost;
+  if (isDevServer) return window.location.origin;
+  if (isTauri()) {
+    return `http://127.0.0.1:${_corsProxyPort}`;
+  }
+  return getOrthancUrl();
 }
 
 /** Persist a new Orthanc URL to localStorage (takes effect after page reload). */

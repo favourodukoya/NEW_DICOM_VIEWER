@@ -93,6 +93,7 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
         const status = await tauri.getOrthancStatus();
         setOrthancOnline(status.running);
         const data = await tauri.getStudies();
+        console.debug('[ukubona] getStudies raw response:', JSON.stringify(data));
         const mapped = data.map(s => ({
           studyInstanceUid: s.study_instance_uid,
           patientName: s.patient_name,
@@ -195,18 +196,17 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     };
     window.addEventListener('beforeunload', handleUnload);
 
-    // Tauri-specific: intercept window close to do async cleanup before allowing close
+    // Tauri-specific: intercept window close to do async cleanup before allowing close.
+    // Uses tauriBridge helpers to avoid importing @tauri-apps/api directly, which causes
+    // rspack to crash in dev mode with "Cannot read properties of undefined (reading 'call')".
     let unlisten: (() => void) | undefined;
     if (tauri.isTauri()) {
       (async () => {
         try {
-          const { getCurrentWindow } = await import('@tauri-apps/api/window');
-          unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
-            event.preventDefault();
+          unlisten = await tauri.onCloseRequested(async () => {
             const uids = getEphemeralUids();
             await deleteEphemeralUids(uids);
             clearEphemeralUids();
-            getCurrentWindow().destroy();
           });
         } catch { /* not critical */ }
       })();
@@ -226,8 +226,11 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
-        const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<string[]>('ukubona://open-files', async event => {
+        // Use __TAURI_INTERNALS__.listen directly to avoid importing @tauri-apps/api/event,
+        // which crashes rspack in dev mode before __TAURI_INTERNALS__ is available.
+        const tauriListen = (window as any).__TAURI_INTERNALS__?.listen;
+        if (!tauriListen) return;
+        unlisten = await tauriListen('ukubona://open-files', async (event: { payload: string[] }) => {
           const rawPaths: string[] = event.payload ?? [];
           if (!rawPaths.length) return;
           // Strip ukubona:// or file:// prefix if present
@@ -423,14 +426,33 @@ export default function StudyCardGrid({ dataPath = '/orthanc' }: StudyCardGridPr
     };
   }, [studies, handleStudyClick, navigate]);
 
-  // Listen for refresh requests from PACS results window after retrieval
+  // Listen for messages from the PACS results window after retrieval
   useEffect(() => {
     const bc = new BroadcastChannel('ukubona_refresh');
     bc.onmessage = (e) => {
-      if (e.data?.action === 'refresh') setTimeout(() => fetchStudies(), 800);
+      if (e.data?.action === 'refresh') {
+        // Legacy refresh action
+        setTimeout(() => fetchStudies(), 800);
+      } else if (e.data?.action === 'open_ephemeral' && e.data?.studyUid) {
+        // Retrieved from PACS — mark ephemeral (auto-deleted on close) and open directly
+        const uid: string = e.data.studyUid;
+        addEphemeralUids([uid]);
+        navigate(`/basic/orthanc?StudyInstanceUIDs=${uid}`);
+      } else if (e.data?.action === 'open_pacs_study' && e.data?.studyUid) {
+        // PACS View button: open a retrieved study with a specific mode
+        const uid: string = e.data.studyUid;
+        const route: string = e.data.route || 'basic';
+        const dp: string = e.data.dataPath || '/orthanc';
+        const extra: string = e.data.extraParams || '';
+        addEphemeralUids([uid]);
+        navigate(`/${route}${dp}?StudyInstanceUIDs=${uid}${extra}`);
+      } else if (e.data?.action === 'mark_ephemeral' && Array.isArray(e.data?.studyUids)) {
+        // Mark additional retrieved studies as ephemeral without navigating
+        addEphemeralUids(e.data.studyUids as string[]);
+      }
     };
     return () => bc.close();
-  }, [fetchStudies]);
+  }, [fetchStudies, navigate]);
 
   const handleDelete = useCallback((study: StudyItem) => {
     setDeleteConfirm(study);

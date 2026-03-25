@@ -16,7 +16,31 @@
       "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions -name *volumeLoader* -o -name *dataSource*)",
       "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/default/src -name *dataSource*)",
       "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/default/src -type f \\\\\\(-name *dicomweb* -o -name *retrieve* \\\\\\))",
-      "Bash(find c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/src-tauri -name orthanc* -not -path */target/*)"
+      "Bash(find c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/src-tauri -name orthanc* -not -path */target/*)",
+      "Bash(find c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/platform/app -name rsbuild.config.* -o -name webpack.config.*)",
+      "Bash(find c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/extensions/ukubona/src -name *.ts -o -name *.tsx)",
+      "Bash(grep -oi \"\"[a-zA-Z]*[Ss]cheme[a-zA-Z]*\"\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/src-tauri/gen/schemas/desktop-schema.json)",
+      "Bash(grep -oi \"\"[a-zA-Z]*[Hh]ttp[a-zA-Z]*\"\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/src-tauri/gen/schemas/desktop-schema.json)",
+      "Bash(grep -r \"use_https_scheme\\\\|useHttpsScheme\" c:/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/src-tauri/ --include=*.rs --include=*.json)",
+      "Read(//c/Users/3ples/.cargo/registry/src/**)",
+      "Bash(grep -B5 -A5 use_https_scheme ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-utils-*/src/config.rs)",
+      "Bash(grep -r \"pacs-study-list\\\\|pacs_results\\\\|report-manager\\\\|ai-panel\" /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/platform/app/src --include=*.tsx --include=*.ts -l)",
+      "Bash(find c:Users3plesDesktop__NEW_DICOM_VIEWER__ -name ModeSelectModal* -type f)",
+      "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__ -maxdepth 3 -name rsbuild.* -o -name .*rsbuild*)",
+      "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__ -name .env* -o -name environment*)",
+      "Bash(cargo tree:*)",
+      "Bash(python test_pacs_query.py)",
+      "Bash(python -X utf8 test_pacs_query.py)",
+      "Bash(timeout /t 8 /nobreak)",
+      "Bash(find /c/Users/3ples/Desktop/__NEW_DICOM_VIEWER__/Viewers-release-3.12/platform/app -type f -name *.config.*)",
+      "Bash(curl -s -v -X OPTIONS http://127.0.0.1:8042/dicom-web/studies)",
+      "Bash(curl -s -v -X OPTIONS http://127.0.0.1:8042/studies)",
+      "Bash(curl -s -v -X OPTIONS -H \"Origin: http://tauri.localhost\" -H \"Access-Control-Request-Method: GET\" http://127.0.0.1:8042/studies)",
+      "Bash(curl -s -v -H \"Origin: http://tauri.localhost\" http://127.0.0.1:8042/studies)",
+      "Bash(grep -A1 \"^name = \"\"hyper\"\"$\\\\|^name = \"\"hyper-util\"\"$\\\\|^name = \"\"http-body-util\"\"$\\\\|^name = \"\"bytes\"\"$\" Cargo.lock)",
+      "Bash(curl -s -v -X OPTIONS -H \"Origin: https://tauri.localhost\" -H \"Access-Control-Request-Method: GET\" http://127.0.0.1:18042/studies)",
+      "Bash(curl -s -v -H \"Origin: https://tauri.localhost\" http://127.0.0.1:18042/studies)",
+      "Bash(taskkill /f /im ukubona-viewer.exe)"
     ]
   }
 }

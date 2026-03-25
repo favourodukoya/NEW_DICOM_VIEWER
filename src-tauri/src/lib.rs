@@ -1,4 +1,5 @@
 mod commands;
+mod cors_proxy;
 mod orthanc;
 mod security;
 mod storage;
@@ -19,6 +20,96 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())
+        // ── Orthanc reverse proxy via custom URI scheme ──────────────────
+        // Register "orthanc://" protocol that proxies all requests to the
+        // local Orthanc instance. This completely bypasses CORS and mixed-
+        // content restrictions in production (where the webview origin is
+        // https://tauri.localhost or tauri://localhost).
+        // Usage in JS: fetch('orthanc://localhost/dicom-web/studies/...')
+        .register_asynchronous_uri_scheme_protocol("orthanc", |_ctx, request, responder| {
+            tauri::async_runtime::spawn(async move {
+                let orthanc_base = orthanc::get_orthanc_url(); // e.g. http://127.0.0.1:8042
+                let uri = request.uri();
+                let path = uri.path();
+                let query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                let target_url = format!("{}{}{}", orthanc_base, path, query_string);
+
+                let client = reqwest::Client::new();
+                let method_str = request.method().as_str();
+                let body_bytes = request.body().clone();
+
+                // Build the outgoing request to Orthanc
+                let mut builder = match method_str {
+                    "GET" => client.get(&target_url),
+                    "POST" => client.post(&target_url),
+                    "PUT" => client.put(&target_url),
+                    "DELETE" => client.delete(&target_url),
+                    "OPTIONS" => {
+                        // Respond to preflight directly — Orthanc may not handle OPTIONS
+                        let resp = http::Response::builder()
+                            .status(200)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+                            .header("Access-Control-Allow-Headers", "*")
+                            .header("Access-Control-Max-Age", "86400")
+                            .body(Vec::new())
+                            .unwrap();
+                        responder.respond(resp);
+                        return;
+                    }
+                    _ => client.request(
+                        reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET),
+                        &target_url,
+                    ),
+                };
+
+                // Forward relevant headers (skip host and origin — those are for the proxy)
+                for (name, value) in request.headers() {
+                    let n = name.as_str().to_lowercase();
+                    if n != "host" && n != "origin" && n != "referer" {
+                        builder = builder.header(name, value);
+                    }
+                }
+
+                // Forward body for POST/PUT
+                if !body_bytes.is_empty() {
+                    builder = builder.body(body_bytes);
+                }
+
+                match builder.send().await {
+                    Ok(orthanc_resp) => {
+                        let status = orthanc_resp.status().as_u16();
+                        let resp_headers = orthanc_resp.headers().clone();
+                        let resp_body = orthanc_resp.bytes().await.unwrap_or_default();
+
+                        let mut response = http::Response::builder().status(status);
+                        // Forward Orthanc response headers
+                        for (name, value) in &resp_headers {
+                            response = response.header(name, value);
+                        }
+                        // Ensure CORS headers are present
+                        response = response.header("Access-Control-Allow-Origin", "*");
+
+                        let resp = response.body(resp_body.to_vec()).unwrap_or_else(|_| {
+                            http::Response::builder()
+                                .status(502)
+                                .body(b"proxy response build error".to_vec())
+                                .unwrap()
+                        });
+                        responder.respond(resp);
+                    }
+                    Err(e) => {
+                        tracing::error!("Orthanc proxy error: {e}");
+                        let resp = http::Response::builder()
+                            .status(502)
+                            .header("Content-Type", "text/plain")
+                            .body(format!("Orthanc proxy error: {e}").into_bytes())
+                            .unwrap();
+                        responder.respond(resp);
+                    }
+                }
+            });
+        })
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -42,19 +133,41 @@ pub fn run() {
                 }
             }
 
-            // Start Orthanc sidecar process.
+            // ── CORS reverse proxy ────────────────────────────────────────────────
+            // Start a local HTTP proxy on a random port that forwards to Orthanc
+            // with full CORS support. This is used in production instead of the
+            // orthanc:// custom scheme because WebView2's XHR doesn't reliably
+            // support custom URI schemes (cornerstoneWADOImageLoader uses XHR).
+            // In dev mode the rsbuild proxy handles this, so the CORS proxy is
+            // still started but the frontend won't use it.
+            tauri::async_runtime::spawn(async {
+                match cors_proxy::start_cors_proxy().await {
+                    Ok(port) => tracing::info!("CORS proxy started on 127.0.0.1:{port}"),
+                    Err(e) => tracing::error!("Failed to start CORS proxy: {e}"),
+                }
+            });
+
+            // Start Orthanc sidecar process — only when the binary is actually bundled.
             // In dev mode (`cargo tauri dev`) Orthanc is assumed to be running externally.
-            // In a production bundle Orthanc is shipped as a sidecar binary and started here.
+            // In production, if no sidecar binary is present the app assumes Orthanc is
+            // already running on the configured port (127.0.0.1:8042 by default).
             #[cfg(not(dev))]
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = orthanc::start_orthanc(&app_handle).await {
-                    tracing::error!("Failed to start Orthanc: {e}");
+                match orthanc::start_orthanc(&app_handle).await {
+                    Ok(()) => tracing::info!("Orthanc sidecar started successfully"),
+                    Err(e) => {
+                        tracing::warn!("Orthanc sidecar not started ({e}). Assuming external Orthanc is running on {}", orthanc::get_orthanc_url());
+                        // Verify the external instance is reachable; log but don't panic.
+                        if !orthanc::is_orthanc_running().await {
+                            tracing::warn!("External Orthanc does not appear to be running at {}. Study list will be empty until Orthanc is started.", orthanc::get_orthanc_url());
+                        }
+                    }
                 }
             });
             #[cfg(dev)]
             {
                 let _ = app_handle; // suppress unused warning
-                tracing::info!("Dev mode: expecting Orthanc to be running externally on port 8042");
+                tracing::info!("Dev mode: expecting Orthanc to be running externally on {}", orthanc::get_orthanc_url());
             }
 
             // Start cleanup scheduler
@@ -97,6 +210,7 @@ pub fn run() {
             commands::save_settings,
             commands::get_orthanc_status,
             commands::get_orthanc_url,
+            commands::get_cors_proxy_port,
             commands::run_cleanup,
             commands::query_pacs,
             commands::retrieve_from_pacs,
@@ -109,6 +223,7 @@ pub fn run() {
             commands::get_device_id,
             commands::list_optical_drives,
             commands::delete_study_by_uid,
+            commands::get_settings_path_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
